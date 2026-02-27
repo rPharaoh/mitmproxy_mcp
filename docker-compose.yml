@@ -1,4 +1,20 @@
 services:
+  # ── Elasticsearch ─────────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   # ── mitmproxy with traffic capture addon ──────────────────────────────
   proxy:
     build:
@@ -6,14 +22,15 @@ services:
       target: proxy
     ports:
       - "8080:8080"                       # proxy listener
-    volumes:
-      - llmproxy-data:/data
     environment:
-      LLMPROXY_DB: /data/traffic.duckdb
+      LLMPROXY_ES_URL: "http://elasticsearch:9200"
       LLMPROXY_MAX_BODY: "524288"         # 512 KB
       LLMPROXY_CAPTURE_BODY: "1"
       LLMPROXY_FLUSH_SIZE: "100"
       LLMPROXY_FLUSH_INTERVAL: "1.0"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
     restart: unless-stopped
 
   # ── MCP server (SSE transport for Docker) ─────────────────────────────
@@ -24,13 +41,12 @@ services:
     command: ["python", "mcp_server.py", "--transport", "sse"]
     ports:
       - "8000:8000"                       # MCP SSE endpoint
-    volumes:
-      - llmproxy-data:/data
     environment:
-      LLMPROXY_DB: /data/traffic.duckdb
+      LLMPROXY_ES_URL: "http://elasticsearch:9200"
     depends_on:
-      - proxy
+      elasticsearch:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  llmproxy-data:
+  es-data:

@@ -7,7 +7,7 @@ Run with:
     python mcp_server.py --transport sse --port 9000
 
 Environment variables:
-    LLMPROXY_DB   Path to the SQLite database (default: ./traffic.db)
+    LLMPROXY_ES_URL   Elasticsearch URL (default: http://elasticsearch:9200)
 """
 
 from __future__ import annotations

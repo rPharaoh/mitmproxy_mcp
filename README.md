@@ -5,11 +5,11 @@ An MCP server that exposes **mitmproxy-captured web traffic** as tools an LLM ca
 ## Architecture
 
 ```
-┌───────────────┐         ┌──────────────┐         ┌───────────────┐
+┌───────────────┐         ┌──────────────┐          ┌───────────────┐
 │   Browser /   │  HTTP   │  mitmproxy   │  write   │               │
-│   App traffic ├────────►│  + addon     ├─────────►│  DuckDB       │
-│               │         │  (proxy_     │          │  (traffic.    │
-└───────────────┘         │   addon.py)  │          │               │
+│   App traffic ├────────►│  + addon     ├─────────►│ Elasticsearch │
+│               │         │  (proxy_     │          │  (search &    │
+└───────────────┘         │   addon.py)  │          │   analytics)  │
                           └──────────────┘          └───────┬───────┘
                                                             │ read
                                                     ┌───────▼───────┐
@@ -24,7 +24,7 @@ An MCP server that exposes **mitmproxy-captured web traffic** as tools an LLM ca
                                                     └───────────────┘
 ```
 
-The **proxy** and the **MCP server** run as separate processes. The proxy writes captured request/response data to a shared **DuckDB** database (columnar, high-throughput), and the MCP server reads from it. A write buffer batches proxy inserts for maximum performance under heavy traffic.
+The **proxy** and the **MCP server** run as separate containers. The proxy writes captured request/response data to a shared **Elasticsearch** instance (full-text search, aggregations, concurrent access), and the MCP server reads from it. A write buffer batches proxy inserts via the ES bulk API for maximum throughput under heavy traffic.
 
 ## Quick Start
 
@@ -38,7 +38,7 @@ This starts:
 - **Proxy** on `http://localhost:8080` — point your browser/app here
 - **MCP server** (SSE) on `http://localhost:8000` — connect your LLM client here
 
-Both share a DuckDB volume (`llmproxy-data`) automatically.
+Both connect to a shared Elasticsearch instance (started automatically).
 
 To stop:
 
@@ -93,6 +93,20 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 #### Claude Desktop (`claude_desktop_config.json`)
 
+**Docker (SSE):**
+
+```json
+{
+  "mcpServers": {
+    "llmproxy": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
+```
+
+**Local (stdio):**
+
 ```json
 {
   "mcpServers": {
@@ -100,7 +114,7 @@ pipenv run python mcp_server.py --transport sse --port 8000
       "command": "python",
       "args": ["path/to/mcp_server.py"],
       "env": {
-        "LLMPROXY_DB": "path/to/traffic.db"
+        "LLMPROXY_ES_URL": "http://localhost:9200"
       }
     }
   }
@@ -109,6 +123,20 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 #### VS Code / Cursor (`.vscode/mcp.json`)
 
+**Docker (SSE):**
+
+```json
+{
+  "servers": {
+    "llmproxy": {
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
+```
+
+**Local (stdio):**
+
 ```json
 {
   "servers": {
@@ -116,7 +144,7 @@ pipenv run python mcp_server.py --transport sse --port 8000
       "command": "python",
       "args": ["path/to/mcp_server.py"],
       "env": {
-        "LLMPROXY_DB": "path/to/traffic.db"
+        "LLMPROXY_ES_URL": "http://localhost:9200"
       }
     }
   }
@@ -201,9 +229,10 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLMPROXY_DB` | `./traffic.duckdb` | Path to the shared DuckDB database |
+| `LLMPROXY_ES_URL` | `http://elasticsearch:9200` | Elasticsearch connection URL |
 | `LLMPROXY_MAX_BODY` | `524288` (512 KB) | Max response body size stored per request |
-| `LLMPROXY_CAPTURE_BODY` | `1` | Set to `0` to skip storing request/response bodies || `LLMPROXY_FLUSH_SIZE` | `100` | Rows in write buffer before auto-flush |
+| `LLMPROXY_CAPTURE_BODY` | `1` | Set to `0` to skip storing request/response bodies |
+| `LLMPROXY_FLUSH_SIZE` | `100` | Rows in write buffer before auto-flush |
 | `LLMPROXY_FLUSH_INTERVAL` | `1.0` | Seconds before timer-based buffer flush |
 ## Files
 

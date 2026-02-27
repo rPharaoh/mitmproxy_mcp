@@ -10,8 +10,7 @@ RUN pipenv install --deploy --system && \
 
 COPY db.py proxy_addon.py mcp_server.py ./
 
-VOLUME /data
-ENV LLMPROXY_DB=/data/traffic.duckdb
+ENV LLMPROXY_ES_URL=http://elasticsearch:9200
 
 # ---------------------------------------------------------------------------
 # Proxy target  –  mitmdump with the capture addon

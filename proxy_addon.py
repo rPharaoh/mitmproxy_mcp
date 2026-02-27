@@ -1,5 +1,5 @@
 """
-mitmproxy addon that captures HTTP(S) traffic into the shared DuckDB store.
+mitmproxy addon that captures HTTP(S) traffic into the shared Elasticsearch store.
 
 Usage:
     mitmproxy -s proxy_addon.py              # interactive console UI
@@ -7,7 +7,7 @@ Usage:
     mitmweb   -s proxy_addon.py              # browser-based UI
 
 Environment variables:
-    LLMPROXY_DB           Path to the SQLite database (default: ./traffic.db)
+    LLMPROXY_ES_URL       Elasticsearch URL (default: http://elasticsearch:9200)
     LLMPROXY_MAX_BODY     Max response body size to store in bytes (default: 512 KB)
     LLMPROXY_CAPTURE_BODY Set to "0" to skip storing bodies entirely
 """
@@ -58,7 +58,7 @@ def _safe_body(raw: bytes | None, content_type: str | None) -> str | None:
 
 
 class TrafficCapture:
-    """Addon that writes every completed HTTP flow to DuckDB and enforces domain blocking."""
+    """Addon that writes every completed HTTP flow to Elasticsearch and enforces domain blocking."""
 
     def __init__(self):
         db.init_db()
@@ -66,7 +66,7 @@ class TrafficCapture:
         self._rules: list[dict] = []
         self._rules_loaded_at: float = 0
         self._RULES_RELOAD_SEC = 5.0
-        ctx.log.info("[LLMProxy] Addon loaded – capturing traffic to " + db.DB_PATH)
+        ctx.log.info("[LLMProxy] Addon loaded – capturing traffic to " + db.ES_URL)
 
     def done(self):
         """Flush buffered writes on proxy shutdown."""

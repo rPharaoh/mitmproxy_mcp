@@ -6,7 +6,7 @@ name = "pypi"
 [packages]
 mitmproxy = ">=10.0"
 mcp = ">=1.0.0"
-duckdb = ">=1.0.0"
+elasticsearch = "*"
 
 [dev-packages]
 
