@@ -858,6 +858,805 @@ def get_live_feed(
 
 
 # ---------------------------------------------------------------------------
+# Security analysis
+# ---------------------------------------------------------------------------
+
+_VULN_SQL_RE = re.compile(
+    r'(?:SQL syntax.*?MySQL|Warning.*?\Wmysql_|valid MySQL result'
+    r'|pg_query\b|pg_exec\b|PostgreSQL.*?ERROR'
+    r'|SQLite3::|sqlite_|SQLITE_ERROR'
+    r'|ORA-\d{5}|SQLSTATE\['
+    r'|Unclosed quotation mark|Microsoft OLE DB'
+    r'|ODBC SQL Server|JET Database Engine)',
+    re.I,
+)
+
+_VULN_XSS_RE = re.compile(
+    r'<script|javascript:|on(?:error|load|click|focus|mouseover)\s*='
+    r'|eval\s*\(|document\.cookie|document\.write',
+    re.I,
+)
+
+_VULN_TRAVERSAL_RE = re.compile(r'\.\./|\.\.\\|%2e%2e[/\\%]', re.I)
+
+_SENSITIVE_PATHS_RE = re.compile(
+    r'(?:\.git[/\\]|\.env\b|\.htaccess|\.htpasswd|wp-admin|wp-login'
+    r'|phpinfo|phpmyadmin|\.DS_Store|web\.config'
+    r'|server-status|server-info|\.svn[/\\]|elmah\.axd'
+    r'|actuator|swagger-ui|api-docs)',
+    re.I,
+)
+
+_CRED_KEYWORDS = (
+    "password=", "passwd=", "pwd=", "secret=", "token=",
+    "api_key=", "apikey=", "access_key=", "auth=",
+)
+
+_PII_PATTERNS = {
+    "email": re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
+    "credit_card": re.compile(
+        r'\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13}'
+        r'|3(?:0[0-5]|[68]\d)\d{11}|6(?:011|5\d{2})\d{12})\b'
+    ),
+    "ssn": re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),
+    "phone": re.compile(r'\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
+    "jwt": re.compile(r'eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]+'),
+    "aws_access_key": re.compile(r'AKIA[0-9A-Z]{16}'),
+    "private_key": re.compile(r'-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----'),
+}
+
+_AUTH_HEADERS = (
+    "authorization", "x-api-key", "x-auth-token",
+    "x-access-token", "proxy-authorization",
+)
+
+_SESSION_COOKIE_NAMES = ("session", "token", "auth", "jwt", "sid", "csrf", "xsrf")
+
+
+def scan_vulnerabilities(limit: int = 500) -> dict:
+    """Scan captured traffic for common vulnerability indicators."""
+    _flush_buffer()
+    findings: list[dict] = []
+    rows = _query(
+        """SELECT id, method, url, host, path, scheme, status_code,
+                  request_headers, request_body, response_headers, response_body
+           FROM requests ORDER BY id DESC LIMIT ?""",
+        [min(limit, 2000)],
+    )
+    for row in rows:
+        row = _parse_json_cols(row)
+        rid, url = row["id"], row["url"] or ""
+        path = row.get("path") or ""
+        resp_body = row.get("response_body") or ""
+        req_body = row.get("request_body") or ""
+        resp_h = row.get("response_headers") if isinstance(row.get("response_headers"), dict) else {}
+
+        if _VULN_SQL_RE.search(resp_body):
+            findings.append({"type": "sql_error_leak", "severity": "high",
+                             "request_id": rid, "url": url,
+                             "detail": "SQL error in response – possible injection"})
+        if _VULN_XSS_RE.search(req_body) or _VULN_XSS_RE.search(url):
+            findings.append({"type": "xss_payload", "severity": "high",
+                             "request_id": rid, "url": url,
+                             "detail": "XSS payload in request"})
+        if _VULN_TRAVERSAL_RE.search(url):
+            findings.append({"type": "path_traversal", "severity": "high",
+                             "request_id": rid, "url": url,
+                             "detail": "Path traversal pattern in URL"})
+        if _SENSITIVE_PATHS_RE.search(path):
+            findings.append({"type": "sensitive_path", "severity": "medium",
+                             "request_id": rid, "url": url,
+                             "detail": "Access to potentially sensitive path"})
+        if row.get("scheme") == "http":
+            combined = (req_body + url).lower()
+            if any(k in combined for k in _CRED_KEYWORDS):
+                findings.append({"type": "plaintext_creds", "severity": "critical",
+                                 "request_id": rid, "url": url,
+                                 "detail": "Credentials over unencrypted HTTP"})
+        server_h = resp_h.get("server", resp_h.get("Server", "")) if isinstance(resp_h, dict) else ""
+        if server_h and re.search(r'\d+\.\d+', str(server_h)):
+            findings.append({"type": "server_version_leak", "severity": "low",
+                             "request_id": rid, "url": url,
+                             "detail": f"Server version: {server_h}"})
+        trace_markers = ("Traceback (most recent", "Exception in thread",
+                         "NullPointerException", "at java.", "at com.")
+        if any(m in resp_body for m in trace_markers):
+            findings.append({"type": "stack_trace_leak", "severity": "medium",
+                             "request_id": rid, "url": url,
+                             "detail": "Stack trace in response"})
+
+    sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for f in findings:
+        sev[f["severity"]] += 1
+    return {"total_scanned": len(rows), "findings_count": len(findings),
+            "by_severity": sev, "findings": findings}
+
+
+def detect_pii(limit: int = 500) -> dict:
+    """Scan request/response bodies and URLs for PII patterns."""
+    _flush_buffer()
+    findings: list[dict] = []
+    rows = _query(
+        """SELECT id, url, host, method, request_body, response_body
+           FROM requests ORDER BY id DESC LIMIT ?""",
+        [min(limit, 2000)],
+    )
+    for row in rows:
+        rid, url = row["id"], row["url"] or ""
+        for loc, text in [("request_body", row.get("request_body") or ""),
+                          ("response_body", row.get("response_body") or ""),
+                          ("url", url)]:
+            if not text:
+                continue
+            for pii_type, pat in _PII_PATTERNS.items():
+                matches = pat.findall(text)
+                if matches:
+                    unique = list(set(matches))[:5]
+                    findings.append({
+                        "type": pii_type, "location": loc,
+                        "request_id": rid, "url": url, "count": len(matches),
+                        "samples": [str(m)[:20] + "..." if len(str(m)) > 20 else str(m) for m in unique],
+                    })
+    by_type: dict[str, int] = {}
+    for f in findings:
+        by_type[f["type"]] = by_type.get(f["type"], 0) + 1
+    return {"total_scanned": len(rows), "findings_count": len(findings),
+            "by_type": by_type, "findings": findings}
+
+
+def extract_session_tokens(limit: int = 300) -> dict:
+    """Extract authentication tokens, session cookies, and API keys from traffic."""
+    _flush_buffer()
+    tokens: list[dict] = []
+    seen: set[str] = set()
+    rows = _query(
+        """SELECT id, url, host, request_headers, response_headers
+           FROM requests ORDER BY id DESC LIMIT ?""",
+        [min(limit, 1000)],
+    )
+    for row in rows:
+        row = _parse_json_cols(row)
+        rid, host = row["id"], row.get("host") or ""
+        req_h = row.get("request_headers") or {}
+        resp_h = row.get("response_headers") or {}
+
+        # Auth headers
+        for k, v in req_h.items():
+            if k.lower() in _AUTH_HEADERS and v:
+                key = f"h:{k}:{v[:30]}"
+                if key not in seen:
+                    seen.add(key)
+                    tokens.append({"type": "auth_header", "header": k,
+                                   "value": v[:80] + ("..." if len(v) > 80 else ""),
+                                   "host": host, "request_id": rid})
+        # Session cookies
+        cookies_raw = req_h.get("cookie", req_h.get("Cookie", ""))
+        if cookies_raw:
+            for part in cookies_raw.split(";"):
+                part = part.strip()
+                if "=" in part:
+                    name, val = part.split("=", 1)
+                    if any(s in name.strip().lower() for s in _SESSION_COOKIE_NAMES):
+                        key = f"c:{host}:{name.strip()}:{val[:20]}"
+                        if key not in seen:
+                            seen.add(key)
+                            tokens.append({"type": "session_cookie", "name": name.strip(),
+                                           "value": val[:60] + ("..." if len(val) > 60 else ""),
+                                           "host": host, "request_id": rid})
+        # Set-Cookie in responses
+        for k, v in resp_h.items():
+            if k.lower() == "set-cookie" and v:
+                key = f"sc:{host}:{v[:40]}"
+                if key not in seen:
+                    seen.add(key)
+                    tokens.append({"type": "set_cookie",
+                                   "value": v[:120] + ("..." if len(v) > 120 else ""),
+                                   "host": host, "request_id": rid})
+
+    return {"total_scanned": len(rows), "tokens_found": len(tokens), "tokens": tokens}
+
+
+def detect_session_issues(limit: int = 500) -> dict:
+    """Detect session anomalies: cross-host cookies, missing CSRF, insecure flags."""
+    _flush_buffer()
+    issues: list[dict] = []
+    rows = _query(
+        """SELECT id, url, host, method, request_headers, response_headers
+           FROM requests ORDER BY id DESC LIMIT ?""",
+        [min(limit, 1000)],
+    )
+    session_hosts: dict[str, set[str]] = {}
+    for row in rows:
+        row = _parse_json_cols(row)
+        host = row.get("host") or ""
+        req_h = row.get("request_headers") or {}
+        resp_h = row.get("response_headers") or {}
+
+        cookies = req_h.get("cookie", req_h.get("Cookie", ""))
+        for part in cookies.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, val = part.split("=", 1)
+                if any(s in name.strip().lower() for s in ("session", "sid", "auth")):
+                    session_hosts.setdefault(f"{name.strip()}={val[:40]}", set()).add(host)
+
+        # Missing CSRF on POST forms
+        if row.get("method") in ("POST", "PUT", "DELETE", "PATCH"):
+            ct = req_h.get("content-type", req_h.get("Content-Type", "")).lower()
+            if "form" in ct:
+                has_csrf = any(k.lower() in ("x-csrf-token", "x-xsrf-token") for k in req_h)
+                if not has_csrf:
+                    issues.append({"type": "missing_csrf", "severity": "medium",
+                                   "request_id": row["id"], "url": row["url"],
+                                   "detail": "Form POST without CSRF token"})
+
+        # Insecure Set-Cookie flags
+        for k, v in resp_h.items():
+            if k.lower() == "set-cookie" and v:
+                flags_lower = v.lower()
+                missing_flags = []
+                if "secure" not in flags_lower:
+                    missing_flags.append("Secure")
+                if "httponly" not in flags_lower:
+                    missing_flags.append("HttpOnly")
+                if "samesite" not in flags_lower:
+                    missing_flags.append("SameSite")
+                if missing_flags:
+                    cname = v.split("=")[0].strip() if "=" in v else "unknown"
+                    issues.append({"type": "insecure_cookie", "severity": "medium",
+                                   "request_id": row["id"], "host": host,
+                                   "cookie": cname, "missing_flags": missing_flags,
+                                   "detail": f"Cookie '{cname}' missing: {', '.join(missing_flags)}"})
+
+    for cookie_key, hosts in session_hosts.items():
+        if len(hosts) > 1:
+            issues.append({"type": "cross_host_session", "severity": "high",
+                           "cookie": cookie_key[:50] + "...", "hosts": sorted(hosts),
+                           "detail": f"Session cookie used across {len(hosts)} hosts"})
+
+    return {"total_scanned": len(rows), "issues_count": len(issues), "issues": issues}
+
+
+def detect_c2_patterns(limit: int = 1000) -> dict:
+    """Detect potential C2 beaconing patterns and encoded payloads."""
+    _flush_buffer()
+    findings: list[dict] = []
+    rows = _query(
+        """SELECT host, timestamp, url, method, content_type, content_length
+           FROM requests ORDER BY timestamp ASC LIMIT ?""",
+        [min(limit, 5000)],
+    )
+    by_host: dict[str, list[dict]] = {}
+    for r in rows:
+        by_host.setdefault(r["host"], []).append(r)
+
+    for host, reqs in by_host.items():
+        if len(reqs) < 5:
+            continue
+        timestamps = []
+        for r in reqs:
+            ts = r["timestamp"]
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts)
+                except (ValueError, TypeError):
+                    continue
+            timestamps.append(ts)
+        if len(timestamps) < 5:
+            continue
+
+        intervals = []
+        for i in range(1, len(timestamps)):
+            delta = (timestamps[i] - timestamps[i - 1]).total_seconds()
+            if 0 < delta < 3600:
+                intervals.append(delta)
+        if len(intervals) < 4:
+            continue
+
+        avg = sum(intervals) / len(intervals)
+        if avg < 1:
+            continue
+        variance = sum((x - avg) ** 2 for x in intervals) / len(intervals)
+        std_dev = variance ** 0.5
+        cv = std_dev / avg if avg > 0 else float("inf")
+
+        if cv < 0.3 and avg < 300:
+            findings.append({
+                "type": "beaconing", "severity": "high", "host": host,
+                "avg_interval_sec": round(avg, 1),
+                "std_dev_sec": round(std_dev, 1),
+                "coefficient_of_variation": round(cv, 3),
+                "sample_count": len(intervals),
+                "detail": f"Regular beaconing: ~{avg:.0f}s intervals (CV={cv:.2f})",
+            })
+
+    # Encoded payloads in URLs
+    for r in rows:
+        url = r.get("url") or ""
+        if "?" in url:
+            query = url.split("?", 1)[1]
+            if len(query) > 200 and re.search(r'[A-Za-z0-9+/=]{100,}', query):
+                findings.append({
+                    "type": "encoded_payload", "severity": "medium",
+                    "host": r["host"], "url": url[:200],
+                    "detail": "Suspiciously long encoded query parameter",
+                })
+
+    return {"total_scanned": len(rows), "findings_count": len(findings), "findings": findings}
+
+
+# ---------------------------------------------------------------------------
+# Privacy & compliance
+# ---------------------------------------------------------------------------
+
+_AD_PATTERN = re.compile(
+    r'(?:doubleclick|googlesyndication|googleadservices|facebook.*ads'
+    r'|ads\.|adserver|adtrack|analytics|tracker|pixel|beacon'
+    r'|taboola|outbrain|criteo|pubmatic|rubiconproject)', re.I,
+)
+_SOCIAL_PATTERN = re.compile(
+    r'(?:facebook|twitter|instagram|linkedin|tiktok|pinterest'
+    r'|reddit|tumblr|snapchat)\.(?:com|net)', re.I,
+)
+_CDN_PATTERN = re.compile(
+    r'(?:cloudflare|cloudfront|akamai|fastly|cdn|static'
+    r'|assets|googleapis|gstatic)', re.I,
+)
+
+
+def audit_third_parties(limit: int = 100) -> dict:
+    """List all external domains contacted with traffic stats and categorization."""
+    _flush_buffer()
+    rows = _query(
+        """SELECT host,
+                  COUNT(*) AS total_requests,
+                  SUM(content_length) AS total_bytes,
+                  STRING_AGG(DISTINCT method, ', ') AS methods,
+                  MIN(timestamp) AS first_seen,
+                  MAX(timestamp) AS last_seen,
+                  SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+           FROM requests GROUP BY host
+           ORDER BY total_requests DESC LIMIT ?""",
+        [min(limit, 500)],
+    )
+    for r in rows:
+        host = r["host"] or ""
+        if _AD_PATTERN.search(host):
+            r["category"] = "advertising/tracking"
+        elif _SOCIAL_PATTERN.search(host):
+            r["category"] = "social_media"
+        elif _CDN_PATTERN.search(host):
+            r["category"] = "cdn/static"
+        else:
+            r["category"] = "other"
+    return {"total_domains": len(rows), "domains": rows}
+
+
+def analyze_cookies_in_traffic(limit: int = 300) -> dict:
+    """Parse and categorize all cookies from Set-Cookie headers."""
+    _flush_buffer()
+    cookies_map: dict[str, dict] = {}
+    rows = _query(
+        """SELECT id, host, request_headers, response_headers
+           FROM requests ORDER BY id DESC LIMIT ?""",
+        [min(limit, 1000)],
+    )
+    for row in rows:
+        row = _parse_json_cols(row)
+        host = row.get("host") or ""
+        resp_h = row.get("response_headers") or {}
+
+        for k, v in resp_h.items():
+            if k.lower() != "set-cookie" or not v:
+                continue
+            parts = [p.strip() for p in v.split(";")]
+            if not parts or "=" not in parts[0]:
+                continue
+            name, val = parts[0].split("=", 1)
+            name = name.strip()
+            flags_raw = [p.lower().strip() for p in parts[1:]]
+            flags: dict[str, Any] = {}
+            for f in flags_raw:
+                if f:
+                    if "=" in f:
+                        fk, fv = f.split("=", 1)
+                        flags[fk] = fv
+                    else:
+                        flags[f] = True
+
+            key = f"{host}:{name}"
+            if key not in cookies_map:
+                name_l = name.lower()
+                if any(s in name_l for s in ("session", "sid", "auth", "login")):
+                    category = "session"
+                elif any(s in name_l for s in ("track", "analytics", "_ga", "_gid", "_fbp", "pixel")):
+                    category = "tracking"
+                elif any(s in name_l for s in ("csrf", "xsrf")):
+                    category = "csrf"
+                elif any(s in name_l for s in ("pref", "lang", "theme", "consent")):
+                    category = "preference"
+                else:
+                    category = "other"
+                cookies_map[key] = {
+                    "name": name, "host": host, "category": category,
+                    "secure": "secure" in flags, "httponly": "httponly" in flags,
+                    "samesite": flags.get("samesite", "not set"),
+                    "path": flags.get("path", "/"),
+                    "max_age": flags.get("max-age"),
+                    "seen_count": 0,
+                    "sample_value": val[:40] + ("..." if len(val) > 40 else ""),
+                }
+            cookies_map[key]["seen_count"] += 1
+
+    cookies = sorted(cookies_map.values(), key=lambda c: c["seen_count"], reverse=True)
+    by_cat: dict[str, int] = {}
+    for c in cookies:
+        by_cat[c["category"]] = by_cat.get(c["category"], 0) + 1
+    return {"total_cookies": len(cookies), "by_category": by_cat, "cookies": cookies}
+
+
+# ---------------------------------------------------------------------------
+# Debugging & development
+# ---------------------------------------------------------------------------
+
+def compare_requests(id1: int, id2: int) -> dict:
+    """Compare two requests side-by-side, highlighting differences."""
+    _flush_buffer()
+    r1 = get_request_by_id(id1)
+    r2 = get_request_by_id(id2)
+    if not r1 or not r2:
+        missing = str(id1) if not r1 else str(id2)
+        return {"error": f"Request #{missing} not found"}
+
+    diffs: list[dict] = []
+    for field in ("method", "url", "host", "path", "scheme", "status_code",
+                  "content_type", "content_length", "duration_ms"):
+        v1, v2 = r1.get(field), r2.get(field)
+        if v1 != v2:
+            diffs.append({"field": field, "request_1": v1, "request_2": v2})
+
+    for hdr_key in ("request_headers", "response_headers"):
+        h1 = r1.get(hdr_key) or {}
+        h2 = r2.get(hdr_key) or {}
+        all_keys = sorted(set(list(h1.keys()) + list(h2.keys())))
+        for k in all_keys:
+            v1, v2 = h1.get(k), h2.get(k)
+            if v1 != v2:
+                diffs.append({"field": f"{hdr_key}.{k}", "request_1": v1, "request_2": v2})
+
+    for body_key in ("request_body", "response_body"):
+        b1, b2 = r1.get(body_key) or "", r2.get(body_key) or ""
+        if b1 != b2:
+            diffs.append({
+                "field": body_key,
+                "request_1": b1[:200] + ("..." if len(b1) > 200 else ""),
+                "request_2": b2[:200] + ("..." if len(b2) > 200 else ""),
+            })
+
+    return {
+        "request_1": {"id": id1, "method": r1.get("method"), "url": r1.get("url")},
+        "request_2": {"id": id2, "method": r2.get("method"), "url": r2.get("url")},
+        "differences_count": len(diffs),
+        "identical": len(diffs) == 0,
+        "differences": diffs,
+    }
+
+
+def generate_openapi_spec(host: str | None = None) -> dict:
+    """Generate an OpenAPI 3.0 spec from observed traffic patterns."""
+    _flush_buffer()
+    clauses: list[str] = []
+    params: list = []
+    if host:
+        clauses.append("host ILIKE ?")
+        params.append(f"%{host}%")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    rows = _query(
+        f"""SELECT DISTINCT host, path, method, status_code,
+                   content_type, request_headers, request_body,
+                   response_headers, response_body
+            FROM requests{where}
+            ORDER BY host, path, method
+            LIMIT 2000""",
+        params or None,
+    )
+
+    hosts_seen: set[str] = set()
+    paths_spec: dict[str, dict] = {}
+    for row in rows:
+        row = _parse_json_cols(row)
+        h = row["host"]
+        hosts_seen.add(h)
+        norm = _normalize_path(row["path"])
+        method = (row["method"] or "GET").lower()
+        status = str(row.get("status_code") or 200)
+        ct = row.get("content_type") or "application/json"
+
+        if norm not in paths_spec:
+            paths_spec[norm] = {}
+        if method not in paths_spec[norm]:
+            paths_spec[norm][method] = {
+                "summary": f"{row['method']} {norm}",
+                "responses": {},
+            }
+            path_params = []
+            for seg in norm.split("/"):
+                if seg.startswith("{") and seg.endswith("}"):
+                    path_params.append({
+                        "name": seg[1:-1], "in": "path",
+                        "required": True, "schema": {"type": "string"},
+                    })
+            if path_params:
+                paths_spec[norm][method]["parameters"] = path_params
+
+        op = paths_spec[norm][method]
+        if status not in op["responses"]:
+            ct_clean = ct.split(";")[0].strip() if ct else "application/json"
+            op["responses"][status] = {
+                "description": f"Status {status}",
+                "content": {ct_clean: {"schema": {"type": "object"}}},
+            }
+
+    primary_host = host or (sorted(hosts_seen)[0] if hosts_seen else "localhost")
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": f"API for {primary_host}",
+            "version": "1.0.0",
+            "description": "Auto-generated from captured traffic by LLMProxy",
+        },
+        "servers": [{"url": f"https://{h}"} for h in sorted(hosts_seen)[:5]],
+        "paths": paths_spec,
+    }
+
+
+def analyze_performance(limit: int = 100) -> dict:
+    """Find slow endpoints, large payloads, redundant requests, and error hotspots."""
+    _flush_buffer()
+    slow = _query(
+        """SELECT host, path, method,
+                  COUNT(*) AS hits,
+                  AVG(duration_ms) AS avg_ms,
+                  MAX(duration_ms) AS max_ms,
+                  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms
+           FROM requests WHERE duration_ms IS NOT NULL
+           GROUP BY host, path, method HAVING COUNT(*) >= 2
+           ORDER BY avg_ms DESC LIMIT ?""",
+        [min(limit, 100)],
+    )
+    large = _query(
+        """SELECT id, url, host, method, content_type,
+                  content_length, duration_ms
+           FROM requests WHERE content_length IS NOT NULL
+           ORDER BY content_length DESC LIMIT 20"""
+    )
+    redundant = _query(
+        """SELECT url, method, COUNT(*) AS hits
+           FROM requests GROUP BY url, method
+           HAVING COUNT(*) > 3 ORDER BY hits DESC LIMIT 20"""
+    )
+    error_prone = _query(
+        """SELECT host, path, method,
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors,
+                  ROUND(100.0 * SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END)
+                        / COUNT(*), 1) AS error_rate
+           FROM requests GROUP BY host, path, method
+           HAVING errors > 0 ORDER BY error_rate DESC LIMIT 20"""
+    )
+    return {
+        "slow_endpoints": slow,
+        "large_payloads": large,
+        "redundant_requests": redundant,
+        "error_prone_endpoints": error_prone,
+    }
+
+
+def generate_curl_command(request_id: int) -> str:
+    """Generate a curl command that reproduces a captured request."""
+    req = get_request_by_id(request_id)
+    if not req:
+        return ""
+    parts = [f"curl -X {req['method']}"]
+    parts.append(f"  '{req['url']}'")
+    headers = req.get("request_headers") or {}
+    skip = {"host", "content-length", "transfer-encoding"}
+    for k, v in headers.items():
+        if k.lower() not in skip:
+            parts.append(f"  -H '{k}: {v}'")
+    body = req.get("request_body")
+    if body and not body.startswith("<"):
+        escaped = body.replace("'", "'\\''")
+        parts.append(f"  -d '{escaped}'")
+    return " \\\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Monitoring & analysis
+# ---------------------------------------------------------------------------
+
+def detect_anomalies(limit: int = 1000) -> dict:
+    """Detect unusual traffic patterns: status spikes, timing outliers, rare hosts."""
+    _flush_buffer()
+    status_dist = _query(
+        """SELECT status_code, COUNT(*) AS cnt
+           FROM requests WHERE status_code IS NOT NULL
+           GROUP BY status_code ORDER BY cnt DESC"""
+    )
+    stats = _query(
+        "SELECT AVG(duration_ms) AS avg, STDDEV(duration_ms) AS sd "
+        "FROM requests WHERE duration_ms IS NOT NULL"
+    )
+    avg_d = stats[0]["avg"] if stats and stats[0]["avg"] else 0
+    sd_d = stats[0]["sd"] if stats and stats[0]["sd"] else 0
+    threshold = avg_d + 3 * sd_d if sd_d else avg_d * 3
+
+    outliers = []
+    if threshold > 0:
+        outliers = _query(
+            """SELECT id, url, host, method, duration_ms, status_code
+               FROM requests WHERE duration_ms > ? ORDER BY duration_ms DESC LIMIT 20""",
+            [threshold],
+        )
+    rare_hosts = _query(
+        """SELECT host, COUNT(*) AS cnt, MIN(timestamp) AS first_seen
+           FROM requests GROUP BY host HAVING cnt <= 2
+           ORDER BY first_seen DESC LIMIT 30"""
+    )
+    error_bursts = _query(
+        """SELECT DATE_TRUNC('minute', timestamp) AS minute,
+                  COUNT(*) AS error_count,
+                  STRING_AGG(DISTINCT host, ', ') AS hosts
+           FROM requests WHERE status_code >= 400
+           GROUP BY DATE_TRUNC('minute', timestamp)
+           HAVING error_count >= 5 ORDER BY minute DESC LIMIT 20"""
+    )
+    return {
+        "status_distribution": status_dist,
+        "timing_outliers": {"threshold_ms": round(threshold, 1), "outliers": outliers},
+        "rare_hosts": rare_hosts,
+        "error_bursts": error_bursts,
+    }
+
+
+def summarize_activity(hours: int = 24) -> dict:
+    """High-level activity summary for a given time window."""
+    _flush_buffer()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    overview = _query(
+        """SELECT COUNT(*) AS total_requests,
+                  COUNT(DISTINCT host) AS unique_hosts,
+                  SUM(content_length) AS total_bytes,
+                  AVG(duration_ms) AS avg_duration_ms,
+                  SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+           FROM requests WHERE timestamp >= ?""",
+        [cutoff],
+    )
+    top_hosts = _query(
+        """SELECT host, COUNT(*) AS requests, SUM(content_length) AS bytes
+           FROM requests WHERE timestamp >= ?
+           GROUP BY host ORDER BY requests DESC LIMIT 10""",
+        [cutoff],
+    )
+    top_paths = _query(
+        """SELECT host, path, method, COUNT(*) AS hits
+           FROM requests WHERE timestamp >= ?
+           GROUP BY host, path, method ORDER BY hits DESC LIMIT 10""",
+        [cutoff],
+    )
+    hourly = _query(
+        """SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS requests
+           FROM requests WHERE timestamp >= ?
+           GROUP BY hour ORDER BY hour""",
+        [cutoff],
+    )
+    return {
+        "period_hours": hours,
+        "overview": overview[0] if overview else {},
+        "top_hosts": top_hosts,
+        "top_paths": top_paths,
+        "hourly_breakdown": hourly,
+    }
+
+
+def bandwidth_analysis(limit: int = 50) -> dict:
+    """Identify top bandwidth consumers by host and content type."""
+    _flush_buffer()
+    by_host = _query(
+        """SELECT host, SUM(content_length) AS total_bytes,
+                  COUNT(*) AS requests, AVG(content_length) AS avg_bytes
+           FROM requests WHERE content_length > 0
+           GROUP BY host ORDER BY total_bytes DESC LIMIT ?""",
+        [min(limit, 100)],
+    )
+    by_type = _query(
+        """SELECT content_type, SUM(content_length) AS total_bytes,
+                  COUNT(*) AS requests, AVG(content_length) AS avg_bytes
+           FROM requests WHERE content_length > 0 AND content_type IS NOT NULL
+           GROUP BY content_type ORDER BY total_bytes DESC LIMIT 20"""
+    )
+    largest = _query(
+        """SELECT id, url, host, content_type, content_length
+           FROM requests WHERE content_length IS NOT NULL
+           ORDER BY content_length DESC LIMIT 20"""
+    )
+    total = _query(
+        "SELECT SUM(content_length) AS total FROM requests WHERE content_length > 0"
+    )
+    return {
+        "total_bytes": total[0]["total"] if total else 0,
+        "by_host": by_host,
+        "by_content_type": by_type,
+        "largest_responses": largest,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Traffic manipulation rules
+# ---------------------------------------------------------------------------
+
+def add_traffic_rule(
+    rule_type: str,
+    action: dict,
+    match_host: str | None = None,
+    match_path: str | None = None,
+    match_url: str | None = None,
+    description: str | None = None,
+) -> int:
+    """Add a traffic manipulation rule. Returns rule ID."""
+    now = datetime.now(timezone.utc)
+    conn = _get_conn()
+    with _lock:
+        result = conn.execute(
+            """INSERT INTO traffic_rules
+                   (rule_type, match_host, match_path, match_url,
+                    action, description, enabled, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, TRUE, ?) RETURNING id""",
+            [rule_type, match_host, match_path, match_url,
+             json.dumps(action), description, now],
+        )
+        row = result.fetchone()
+    return row[0] if row else 0
+
+
+def get_traffic_rules(enabled_only: bool = True) -> list[dict]:
+    """List traffic manipulation rules."""
+    if enabled_only:
+        rows = _query(
+            "SELECT * FROM traffic_rules WHERE enabled = TRUE ORDER BY created_at DESC"
+        )
+    else:
+        rows = _query("SELECT * FROM traffic_rules ORDER BY created_at DESC")
+    for r in rows:
+        if isinstance(r.get("action"), str):
+            try:
+                r["action"] = json.loads(r["action"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return rows
+
+
+def remove_traffic_rule(rule_id: int) -> bool:
+    """Remove a traffic rule by ID."""
+    rows = _query("SELECT id FROM traffic_rules WHERE id = ?", [rule_id])
+    if not rows:
+        return False
+    _execute("DELETE FROM traffic_rules WHERE id = ?", [rule_id])
+    return True
+
+
+def toggle_traffic_rule(rule_id: int, enabled: bool) -> bool:
+    """Enable or disable a traffic rule."""
+    rows = _query("SELECT id FROM traffic_rules WHERE id = ?", [rule_id])
+    if not rows:
+        return False
+    _execute("UPDATE traffic_rules SET enabled = ? WHERE id = ?", [enabled, rule_id])
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
 

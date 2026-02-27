@@ -125,6 +125,8 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 ## MCP Tools
 
+### Core Traffic Tools
+
 | Tool | Description |
 |------|-------------|
 | `get_recent_requests` | List recent captured requests with optional filters (method, host, status, URL search) |
@@ -138,13 +140,62 @@ pipenv run python mcp_server.py --transport sse --port 8000
 | `list_blocked_domains` | Show all blocked domains |
 | `tag_request` | Attach a label to a request |
 | `get_request_tags` | Retrieve tags for a request |
-| `analyze_security_headers` | Check response for HSTS, CSP, X-Frame-Options, etc. |
-| `map_api` | Discover and map API endpoints from captured traffic (auto-normalizes paths) |
-| `get_endpoint_detail` | Drill into a specific endpoint — see recent requests matching a host + path pattern |
-| `get_ws_connections` | List captured WebSocket connections with message counts and bytes |
-| `get_ws_messages` | List WebSocket messages with filters (flow, host, direction, content search) |
-| `get_ws_stats` | Overall WebSocket statistics (messages, connections, bytes, send/receive) |
 | `get_live_feed` | Poll-based live stream — returns new HTTP + WS traffic since last cursor |
+
+### API Mapping & WebSocket
+
+| Tool | Description |
+|------|-------------|
+| `map_api` | Discover and map API endpoints from captured traffic (auto-normalizes paths) |
+| `get_endpoint_detail` | Drill into a specific endpoint — recent requests matching host + path |
+| `get_ws_connections` | List captured WebSocket connections with message counts and bytes |
+| `get_ws_messages` | List WebSocket messages with filters (flow, host, direction, search) |
+| `get_ws_stats` | Overall WebSocket statistics |
+
+### Security & Penetration Testing
+
+| Tool | Description |
+|------|-------------|
+| `scan_vulnerabilities` | Scan traffic for SQL injection leaks, XSS, path traversal, plaintext creds, exposed paths, stack traces |
+| `analyze_security_headers` | Check response for HSTS, CSP, X-Frame-Options, etc. |
+| `detect_pii` | Scan bodies for PII: emails, credit cards, SSNs, phones, JWTs, AWS keys |
+| `extract_session_tokens` | Find auth tokens, session cookies, API keys across traffic |
+| `detect_session_issues` | Cross-host cookie reuse, missing CSRF, insecure cookie flags |
+| `detect_c2_patterns` | Detect C2 beaconing (regular-interval requests) and encoded payloads |
+
+### Privacy & Compliance
+
+| Tool | Description |
+|------|-------------|
+| `audit_third_parties` | List all external domains with stats, categorized as ads/tracking, social, CDN |
+| `analyze_cookies` | Parse and categorize cookies: session, tracking, CSRF, preference; reports security flags |
+
+### Debugging & Development
+
+| Tool | Description |
+|------|-------------|
+| `compare_requests` | Side-by-side diff of two requests (headers, body, status, timing) |
+| `generate_openapi_spec` | Generate OpenAPI 3.0 spec from observed traffic patterns |
+| `analyze_performance` | Find slow endpoints (P95), large payloads, redundant requests, error hotspots |
+| `generate_curl` | Generate a curl command that reproduces a captured request |
+
+### Monitoring & Analysis
+
+| Tool | Description |
+|------|-------------|
+| `detect_anomalies` | Status distribution, timing outliers (>3σ), rare hosts, error bursts |
+| `summarize_activity` | Activity dashboard: totals, top hosts/paths, hourly breakdown |
+| `bandwidth_analysis` | Top bandwidth consumers by host and content type |
+
+### Active Traffic Manipulation
+
+| Tool | Description |
+|------|-------------|
+| `replay_request` | Replay a captured request with modified headers, body, method, or URL |
+| `create_traffic_rule` | Create real-time proxy rules: inject headers, throttle, block patterns, modify bodies |
+| `list_traffic_rules` | List all active traffic manipulation rules |
+| `remove_traffic_rule` | Remove a traffic rule by ID |
+| `toggle_traffic_rule` | Enable/disable a rule without deleting it |
 
 ## Environment Variables
 
@@ -171,17 +222,44 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 Once connected, you can ask your LLM things like:
 
+**Traffic inspection:**
 - *"Show me the last 10 requests to api.example.com"*
 - *"Are there any requests returning 500 errors?"*
 - *"Summarize which domains are getting the most traffic"*
-- *"Block ads.tracker.com — it's an analytics tracker"*
+- *"Stream the live traffic and tell me what’s happening"*
+
+**Security & pen testing:**
+- *"Scan all captured traffic for vulnerabilities"*
+- *"Check if any requests are leaking PII like emails or credit cards"*
+- *"Extract all session tokens and API keys from the traffic"*
+- *"Look for C2 beaconing patterns in outbound traffic"*
 - *"Check the security headers on request #42"*
-- *"Search for any requests containing 'password' in the request body"*
-- *"Tag request #15 as 'suspicious'"*
+- *"Are any cookies missing Secure or HttpOnly flags?"*
+
+**Privacy & compliance:**
+- *"Audit all third-party domains – which ones are trackers?"*
+- *"Categorize all cookies being set and check their security flags"*
+
+**Debugging & development:**
+- *"Compare request #10 with request #15 – why did one fail?"*
+- *"Generate an OpenAPI spec from the api.example.com traffic"*
+- *"Find performance bottlenecks – which endpoints are slowest?"*
+- *"Generate a curl command for request #42"*
 - *"Map out all the API endpoints on api.example.com"*
-- *"Show me the details for GET /users/{id} on that API"*
+
+**Monitoring:**
+- *"Detect any anomalies in the traffic"*
+- *"Give me an activity summary for the last 4 hours"*
+- *"Which hosts are consuming the most bandwidth?"*
+
+**Active manipulation:**
+- *"Replay request #42 but change the Authorization header"*
+- *"Add an X-Frame-Options: DENY header to all responses from example.com"*
+- *"Throttle requests to slow-api.com by 2 seconds"*
+- *"Block all requests matching /ads/*"*
+- *"List all active traffic rules"*
+
+**WebSocket:**
 - *"List all WebSocket connections"*
 - *"Show me the WebSocket messages for flow abc123"*
 - *"Give me overall WebSocket stats"*
-- *"Stream the live traffic — keep calling get_live_feed and tell me what's happening"*
-- *"Watch the traffic feed and alert me if you see any 500 errors"*

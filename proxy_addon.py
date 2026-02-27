@@ -14,9 +14,11 @@ Environment variables:
 
 from __future__ import annotations
 
-import os
-import time
+import json
 import logging
+import os
+import re
+import time
 from mitmproxy import http, websocket, ctx
 
 import db
@@ -61,12 +63,39 @@ class TrafficCapture:
     def __init__(self):
         db.init_db()
         self._flow_start: dict[str, float] = {}
+        self._rules: list[dict] = []
+        self._rules_loaded_at: float = 0
+        self._RULES_RELOAD_SEC = 5.0
         ctx.log.info("[LLMProxy] Addon loaded – capturing traffic to " + db.DB_PATH)
 
     def done(self):
         """Flush buffered writes on proxy shutdown."""
         db.flush()
         ctx.log.info("[LLMProxy] Flushed write buffer on shutdown")
+
+    # -- Rule engine ---------------------------------------------------------
+
+    def _load_rules(self) -> None:
+        """Reload traffic rules from DB if stale."""
+        now = time.time()
+        if now - self._rules_loaded_at < self._RULES_RELOAD_SEC:
+            return
+        try:
+            self._rules = db.get_traffic_rules(enabled_only=True)
+            self._rules_loaded_at = now
+        except Exception:
+            pass  # keep cached rules
+
+    @staticmethod
+    def _rule_matches(rule: dict, host: str, path: str, url: str) -> bool:
+        """Check whether a rule matches a given request."""
+        for field, value in (("match_host", host), ("match_path", path), ("match_url", url)):
+            pattern = rule.get(field)
+            if pattern:
+                regex = pattern.replace("*", ".*")
+                if not re.search(regex, value, re.I):
+                    return False
+        return True
 
     # -- Request phase: check block list & record start time -----------------
 
@@ -82,6 +111,28 @@ class TrafficCapture:
                 {"Content-Type": "text/plain"},
             )
             ctx.log.warn(f"[LLMProxy] Blocked {host}: {reason}")
+            return
+
+        # Apply request-phase traffic rules
+        self._load_rules()
+        for rule in self._rules:
+            if not self._rule_matches(rule, host, flow.request.path, flow.request.pretty_url):
+                continue
+            action = rule.get("action") or {}
+            rtype = rule.get("rule_type")
+            if rtype == "inject_request_header":
+                flow.request.headers[action.get("header", "")] = action.get("value", "")
+            elif rtype == "block_pattern":
+                flow.response = http.Response.make(
+                    action.get("status", 403),
+                    (action.get("body", "Blocked by rule")).encode(),
+                    {"Content-Type": "text/plain"},
+                )
+                return
+            elif rtype == "throttle":
+                delay = action.get("delay_ms", 0) / 1000.0
+                if delay > 0:
+                    time.sleep(delay)
 
     # -- Response phase: store the full exchange -----------------------------
 
@@ -91,6 +142,24 @@ class TrafficCapture:
 
         req = flow.request
         resp = flow.response
+
+        # Apply response-phase traffic rules before storing
+        self._load_rules()
+        for rule in self._rules:
+            if not self._rule_matches(rule, req.pretty_host, req.path, req.pretty_url):
+                continue
+            action = rule.get("action") or {}
+            rtype = rule.get("rule_type")
+            if rtype == "inject_response_header" and resp:
+                resp.headers[action.get("header", "")] = action.get("value", "")
+            elif rtype == "modify_response_body" and resp:
+                try:
+                    body = resp.get_text(strict=False)
+                    if body and action.get("find"):
+                        body = body.replace(action["find"], action.get("replace", ""))
+                        resp.set_text(body)
+                except Exception:
+                    pass  # skip if body is not decodable
 
         content_type = resp.headers.get("content-type", "") if resp else None
         resp_body_raw = resp.get_content(strict=False) if resp else None
