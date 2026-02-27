@@ -71,6 +71,7 @@ class TrafficCapture:
         db.init_db()
         self._flow_start: dict[str, float] = {}
         self._flow_tenant: dict[str, str | None] = {}   # flow_id → tenant_id
+        self._conn_tenant: dict[str, str | None] = {}   # client_conn.id → tenant_id (from CONNECT)
         self._rules: list[dict] = []
         self._rules_loaded_at: float = 0
         self._RULES_RELOAD_SEC = 5.0
@@ -83,6 +84,10 @@ class TrafficCapture:
         """Flush buffered writes on proxy shutdown."""
         db.flush()
         ctx.log.info("[LLMProxy] Flushed write buffer on shutdown")
+
+    def client_disconnected(self, client_data) -> None:
+        """Clean up stashed tenant when a client disconnects."""
+        self._conn_tenant.pop(getattr(client_data, "id", None), None)
 
     # -- Rule engine ---------------------------------------------------------
 
@@ -110,51 +115,90 @@ class TrafficCapture:
 
     # -- Proxy auth helpers --------------------------------------------------
 
-    def _extract_tenant(self, flow: http.HTTPFlow) -> str | None:
-        """Extract tenant_id from Proxy-Authorization header.
-
-        Username = API token, password = ignored.
-        Returns tenant_id if valid, None for admin or no-auth mode.
-        Sends 407 and returns sentinel '_reject' if auth is required but invalid.
-        """
-        auth_header = flow.request.headers.get("proxy-authorization", "")
-
+    @staticmethod
+    def _parse_proxy_auth(headers) -> str:
+        """Extract token from Proxy-Authorization header. Returns token or ''."""
+        auth_header = headers.get("proxy-authorization", "")
         if auth_header.lower().startswith("basic "):
             try:
                 decoded = base64.b64decode(auth_header[6:]).decode("utf-8", errors="replace")
-                token = decoded.split(":", 1)[0]  # username is the token
+                return decoded.split(":", 1)[0]
             except Exception:
-                token = ""
-        else:
-            token = ""
+                return ""
+        return ""
 
-        # Strip the proxy-auth header so it doesn't reach the upstream server
-        flow.request.headers.pop("proxy-authorization", None)
-
+    def _validate_token(self, token: str) -> str | None:
+        """Validate a token. Returns tenant_id, None for admin, or '_reject' for invalid."""
         if not token:
-            if self._auth_required:
-                flow.response = http.Response.make(
-                    407,
-                    b"Proxy authentication required. Set proxy username to your API token.",
-                    {"Content-Type": "text/plain", "Proxy-Authenticate": "Basic realm=\"LLMProxy\""},
-                )
-                return "_reject"
-            return None  # no auth required, no tenant scoping
-
-        # Admin token → no tenant scoping (sees everything, but don't store without tenant)
+            return "_reject" if self._auth_required else None
         if db.is_admin_token(token):
-            return None
-
+            return None  # admin sees everything
         tenant_id = db.validate_token(token)
-        if tenant_id is None:
+        return tenant_id if tenant_id else "_reject"
+
+    def http_connect(self, flow: http.HTTPFlow) -> None:
+        """Handle CONNECT requests (HTTPS tunnels).
+
+        Chrome/Edge send Proxy-Authorization only on the CONNECT request,
+        not on individual requests inside the tunnel. We validate the token
+        here and stash the tenant_id on the client connection for later use
+        in request().
+        """
+        token = self._parse_proxy_auth(flow.request.headers)
+        result = self._validate_token(token)
+
+        if result == "_reject":
             flow.response = http.Response.make(
                 407,
-                b"Invalid proxy token. Check your API token.",
+                b"Proxy authentication required. Set proxy username to your API token.",
+                {"Content-Type": "text/plain", "Proxy-Authenticate": "Basic realm=\"LLMProxy\""},
+            )
+            return
+
+        # Stash tenant on connection so request() can use it for HTTPS flows
+        conn_id = flow.client_conn.id
+        self._conn_tenant[conn_id] = result
+
+    def _extract_tenant(self, flow: http.HTTPFlow) -> str | None:
+        """Extract tenant_id from Proxy-Authorization header or stashed CONNECT auth.
+
+        For HTTP: reads Proxy-Authorization directly from the request.
+        For HTTPS: uses tenant stashed during http_connect().
+        Returns tenant_id if valid, None for admin or no-auth mode.
+        Sends 407 and returns sentinel '_reject' if auth is required but invalid.
+        """
+        # Check for Proxy-Authorization on the request itself (plain HTTP)
+        token = self._parse_proxy_auth(flow.request.headers)
+        flow.request.headers.pop("proxy-authorization", None)
+
+        if token:
+            # Direct auth header present (HTTP requests)
+            result = self._validate_token(token)
+            if result == "_reject":
+                flow.response = http.Response.make(
+                    407,
+                    b"Invalid proxy token. Check your API token.",
+                    {"Content-Type": "text/plain", "Proxy-Authenticate": "Basic realm=\"LLMProxy\""},
+                )
+            return result
+
+        # No auth header — check if we have a stashed tenant from CONNECT
+        conn_id = flow.client_conn.id
+        if conn_id in self._conn_tenant:
+            return self._conn_tenant[conn_id]
+
+        # No auth at all
+        if self._auth_required:
+            # Allow mitm.it through without auth so users can install the CA cert
+            if flow.request.pretty_host == "mitm.it":
+                return None
+            flow.response = http.Response.make(
+                407,
+                b"Proxy authentication required. Set proxy username to your API token.",
                 {"Content-Type": "text/plain", "Proxy-Authenticate": "Basic realm=\"LLMProxy\""},
             )
             return "_reject"
-
-        return tenant_id
+        return None
 
     # -- Request phase: check block list & record start time -----------------
 

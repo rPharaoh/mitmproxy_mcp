@@ -30,7 +30,7 @@ services:
       LLMPROXY_FLUSH_SIZE: "100"
       LLMPROXY_FLUSH_INTERVAL: "1.0"
       LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-}"
-      LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-0}"
+      LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-1}"
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -47,7 +47,7 @@ services:
     environment:
       LLMPROXY_ES_URL: "http://elasticsearch:9200"
       LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-}"
-      LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-0}"
+      LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-1}"
     depends_on:
       elasticsearch:
         condition: service_healthy
