@@ -45,7 +45,7 @@ services:
       target: mcp
     command: ["python", "mcp_server.py", "--transport", "sse"]
     ports:
-      - "8000:8000"                       # MCP SSE endpoint
+      - "8001:8000"                       # MCP SSE endpoint
     environment:
       LLMPROXY_ES_URL: "http://elasticsearch:9200"
       LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-}"
