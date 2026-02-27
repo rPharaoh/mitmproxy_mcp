@@ -9,6 +9,7 @@ RUN pipenv install --deploy --system && \
     pip cache purge
 
 COPY db.py proxy_addon.py mcp_server.py admin_cli.py ./
+COPY tools/ ./tools/
 
 ENV LLMPROXY_ES_URL=http://elasticsearch:9200
 
