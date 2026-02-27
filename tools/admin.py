@@ -39,3 +39,18 @@ def register(mcp, helpers):
             return _json({"error": "Admin token required for this operation"})
         revoked = db.revoke_token(token)
         return _json({"status": "revoked" if revoked else "not_found"})
+
+    @mcp.tool()
+    def clear_tenant_data(tenant_id: str) -> str:
+        """Delete all captured data for a tenant (admin only).
+
+        Removes requests, websocket messages, blocked domains, tags, and
+        traffic rules.  Token records are preserved — revoke separately
+        if needed.
+
+        tenant_id: the tenant identifier whose data should be wiped.
+        """
+        if not _is_admin.get(False) and db.AUTH_REQUIRED:
+            return _json({"error": "Admin token required for this operation"})
+        counts = db.clear_tenant_data(tenant_id)
+        return _json({"status": "cleared", "tenant_id": tenant_id, "deleted": counts})

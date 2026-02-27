@@ -399,6 +399,30 @@ def list_tokens() -> list[dict]:
     return results
 
 
+def clear_tenant_data(tenant_id: str) -> dict:
+    """Delete all data for a tenant across all indices (except tokens).
+
+    Removes requests, websocket messages, blocked domains, tags, and rules.
+    Token records are preserved (revoke them separately if needed).
+    Returns per-index deletion counts.
+    """
+    es = _get_es()
+    query = {"term": {"tenant_id": tenant_id}}
+    results = {}
+    for idx in (IDX_REQUESTS, IDX_WS, IDX_BLOCKED, IDX_TAGS, IDX_RULES):
+        try:
+            resp = es.delete_by_query(
+                index=idx,
+                body={"query": query},
+                refresh=True,
+                conflicts="proceed",
+            )
+            results[idx] = resp.get("deleted", 0)
+        except Exception as exc:
+            results[idx] = f"error: {exc}"
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Write buffer – batches proxy inserts for throughput
 # ---------------------------------------------------------------------------

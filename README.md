@@ -335,6 +335,42 @@ pipenv run python mcp_server.py --transport sse --port 8000
 | `remove_traffic_rule` | Remove a traffic rule by ID |
 | `toggle_traffic_rule` | Enable/disable a rule without deleting it |
 
+### Fuzzing & Endpoint Discovery
+
+| Tool | Description |
+|------|-------------|
+| `fuzz_request` | Fuzz a captured request's parameters with SQLi, XSS, path traversal, and command injection payloads |
+| `discover_endpoints` | Brute-force common paths on a host (admin panels, backups, config files, API endpoints) |
+
+### External Scanning
+
+| Tool | Description |
+|------|-------------|
+| `nmap_scan` | Run nmap port/service scans against a target (parsed XML output) |
+| `nikto_scan` | Run nikto web vulnerability scanner against a target |
+| `sslyze_scan` | Analyze TLS/SSL configuration of a host |
+| `subfinder_scan` | Discover subdomains for a domain using passive sources |
+| `scan_available_tools` | Check which external scanning tools are installed in the container |
+
+### Reconnaissance & Asset Discovery
+
+| Tool | Description |
+|------|-------------|
+| `discover_hosts` | Discover live hosts on a network/subnet via nmap (ping, ARP, SYN, connect, or service scan) |
+| `fingerprint_services` | Deep service + OS fingerprinting on a single host |
+| `http_probe` | Probe hosts for web servers using httpx — reports status, title, tech stack, CDN |
+| `dns_enum` | Enumerate DNS records (A, AAAA, MX, NS, CNAME, TXT, SOA) with optional subdomain brute-force |
+| `full_recon` | Chained pipeline: subfinder → dnsx → httpx for complete domain asset mapping |
+
+### Admin (requires admin token)
+
+| Tool | Description |
+|------|-------------|
+| `create_token` | Create a new user token |
+| `list_tokens` | List all tokens with masked values |
+| `revoke_token` | Revoke / deactivate a token |
+| `clear_tenant_data` | Delete all captured data for a tenant (requests, websockets, tags, rules, blocked domains) |
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -352,13 +388,25 @@ pipenv run python mcp_server.py --transport sse --port 8000
 |------|---------|
 | `db.py` | Shared database module (schema, inserts, queries) |
 | `proxy_addon.py` | mitmproxy addon — captures traffic, enforces domain blocking |
-| `mcp_server.py` | MCP server — exposes captured traffic as LLM tools |
+| `mcp_server.py` | MCP server entry point — slim core with auth middleware |
 | `admin_cli.py` | Admin CLI — create, list, and revoke API tokens |
+| `tools/__init__.py` | Tool module auto-registration |
+| `tools/traffic.py` | Traffic browsing, search, and live feed tools |
+| `tools/security.py` | Vulnerability scanning, PII detection, session analysis, C2 detection |
+| `tools/websocket.py` | WebSocket connection and message tools |
+| `tools/api_mapping.py` | API mapping and OpenAPI spec generation |
+| `tools/debugging.py` | Request comparison, cURL generation, performance analysis, replay |
+| `tools/privacy.py` | Third-party audit and cookie analysis |
+| `tools/monitoring.py` | Anomaly detection, activity summaries, bandwidth analysis |
+| `tools/control.py` | Domain blocking, tagging, and traffic rule management |
+| `tools/admin.py` | Token management and tenant data clearing (admin-only) |
+| `tools/fuzzing.py` | Parameter fuzzing and endpoint discovery |
+| `tools/scanning.py` | External scanner wrappers (nmap, nikto, sslyze, subfinder) |
+| `tools/recon.py` | Asset discovery and reconnaissance (host discovery, HTTP probing, DNS enum) |
 | `Pipfile` | Python dependencies (pipenv) |
 | `Pipfile.lock` | Locked dependency versions |
-| `Dockerfile` | Multi-stage build (proxy + mcp targets) |
-| `docker-compose.yml` | Runs proxy + MCP server together |
-| `old/` | Backup of previous versions (`old_db.py`, `old_mcp.py`, `old_addon.py`) |
+| `Dockerfile` | Multi-stage build (proxy + mcp targets) with nmap, nikto, httpx, dnsx, subfinder, sslyze |
+| `docker-compose.yml` | Runs proxy + MCP server + Elasticsearch together |
 
 ## Example Prompts
 
@@ -400,6 +448,25 @@ Once connected, you can ask your LLM things like:
 - *"Throttle requests to slow-api.com by 2 seconds"*
 - *"Block all requests matching /ads/*"*
 - *"List all active traffic rules"*
+
+**Fuzzing & scanning:**
+- *"Fuzz request #42 for XSS and SQL injection"*
+- *"Discover hidden endpoints on example.com"*
+- *"Run an nmap scan on 192.168.1.0/24"*
+- *"Scan example.com with nikto"*
+- *"Check the TLS configuration on example.com"*
+- *"Find all subdomains of example.com"*
+
+**Reconnaissance:**
+- *"Discover all live hosts on 10.0.0.0/24"*
+- *"Fingerprint the services on 192.168.1.1"*
+- *"Probe these hosts for web servers and detect their tech stack"*
+- *"Enumerate DNS records for example.com"*
+- *"Run full recon on example.com — find subdomains, resolve DNS, and probe for web servers"*
+
+**Admin:**
+- *"List all tokens"*
+- *"Clear all data for tenant abc123"*
 
 **WebSocket:**
 - *"List all WebSocket connections"*
