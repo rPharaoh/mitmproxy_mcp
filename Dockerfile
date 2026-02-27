@@ -4,6 +4,8 @@ FROM python:3.11-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nmap \
         libnet-ssleay-perl \
+        libjson-perl \
+        libxml-writer-perl \
         perl \
         git \
         wget \
