@@ -46,6 +46,95 @@ To stop:
 docker compose down
 ```
 
+### Multi-Tenant Deployment
+
+To deploy with **per-user token isolation** (each user only sees their own traffic):
+
+1. Create a `.env` file (or export env vars):
+
+```bash
+LLMPROXY_ADMIN_TOKEN=your-secret-admin-token-here
+LLMPROXY_AUTH_REQUIRED=1
+```
+
+2. Start the stack:
+
+```bash
+docker compose up -d
+```
+
+3. Create user tokens via the MCP admin tools (authenticate as admin first):
+
+```
+POST http://localhost:8000/sse
+Authorization: Bearer your-secret-admin-token-here
+```
+
+Then use the `create_token` tool to generate tokens for each user.
+
+#### How Auth Works
+
+**Proxy (mitmproxy):** Users authenticate via `Proxy-Authorization` header using HTTP Basic auth — the **username** is the user's token, the password is ignored.
+
+```
+Proxy-Authorization: Basic <base64(token:)>
+```
+
+The proxy strips this header before forwarding upstream. If auth is required and the token is invalid, the proxy returns **407 Proxy Authentication Required**.
+
+**MCP Server (SSE):** Users authenticate via Bearer token in the `Authorization` header or a `?token=` query parameter.
+
+```
+Authorization: Bearer <user-token>
+```
+or
+```
+http://localhost:8000/sse?token=<user-token>
+```
+
+If the token is invalid or missing, the server returns **401 Unauthorized**.
+
+**Admin token** has unrestricted access — it can see all traffic across all tenants and manage tokens. **User tokens** are scoped to their tenant — they can only see traffic captured under their own token.
+
+#### Admin Tools
+
+Manage tokens via the **Admin CLI** (`admin_cli.py`) or the MCP admin tools:
+
+**CLI (recommended):**
+
+```bash
+# Create a token
+docker compose exec mcp python admin_cli.py create "My App"
+
+# List all tokens (values are masked)
+docker compose exec mcp python admin_cli.py list
+
+# Revoke a token
+docker compose exec mcp python admin_cli.py revoke <token>
+```
+
+For local (non-Docker) usage:
+
+```bash
+LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py create "My App"
+LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py list
+LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py revoke <token>
+```
+
+The `create` command prints the raw token (shown only once), tenant ID, and a ready-to-paste MCP client config snippet.
+
+**MCP tools (from LLM client, admin token required):**
+
+| Tool | Description |
+|------|-------------|
+| `create_token` | Create a new user token |
+| `list_tokens` | List all tokens with masked values |
+| `revoke_token` | Revoke / deactivate a token |
+
+#### Backward Compatibility
+
+When `LLMPROXY_AUTH_REQUIRED` is `0` (the default), auth is completely disabled — no tokens required, all traffic is visible to everyone. This preserves the original single-user behavior.
+
 ### Option B: Local (pipenv)
 
 ### 1. Install dependencies
@@ -234,6 +323,8 @@ pipenv run python mcp_server.py --transport sse --port 8000
 | `LLMPROXY_CAPTURE_BODY` | `1` | Set to `0` to skip storing request/response bodies |
 | `LLMPROXY_FLUSH_SIZE` | `100` | Rows in write buffer before auto-flush |
 | `LLMPROXY_FLUSH_INTERVAL` | `1.0` | Seconds before timer-based buffer flush |
+| `LLMPROXY_AUTH_REQUIRED` | `0` | Set to `1` to enable multi-tenant token authentication |
+| `LLMPROXY_ADMIN_TOKEN` | *(empty)* | Admin token for unrestricted access and token management |
 ## Files
 
 | File | Purpose |
@@ -241,6 +332,7 @@ pipenv run python mcp_server.py --transport sse --port 8000
 | `db.py` | Shared database module (schema, inserts, queries) |
 | `proxy_addon.py` | mitmproxy addon — captures traffic, enforces domain blocking |
 | `mcp_server.py` | MCP server — exposes captured traffic as LLM tools |
+| `admin_cli.py` | Admin CLI — create, list, and revoke API tokens |
 | `Pipfile` | Python dependencies (pipenv) |
 | `Pipfile.lock` | Locked dependency versions |
 | `Dockerfile` | Multi-stage build (proxy + mcp targets) |

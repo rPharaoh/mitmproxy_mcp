@@ -7,17 +7,31 @@ Run with:
     python mcp_server.py --transport sse --port 9000
 
 Environment variables:
-    LLMPROXY_ES_URL   Elasticsearch URL (default: http://elasticsearch:9200)
+    LLMPROXY_ES_URL         Elasticsearch URL (default: http://elasticsearch:9200)
+    LLMPROXY_ADMIN_TOKEN    Admin token for token management (required for admin tools)
+    LLMPROXY_AUTH_REQUIRED  Set to "1" to require auth on SSE connections
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 import db
+
+# ---------------------------------------------------------------------------
+# Tenant context – set by auth middleware, read by tool functions
+# ---------------------------------------------------------------------------
+
+_current_tenant: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_tenant", default=None
+)
+_is_admin: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "is_admin", default=False
+)
 
 # ---------------------------------------------------------------------------
 
@@ -45,6 +59,11 @@ def _json(obj: Any) -> str:
     return json.dumps(obj, indent=2, default=str)
 
 
+def _tid() -> str | None:
+    """Get the current tenant_id from request context."""
+    return _current_tenant.get(None)
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -66,6 +85,7 @@ def get_recent_requests(
     rows = db.get_recent_requests(
         limit=limit, method=method, host=host,
         status_code=status_code, search=search,
+        tenant_id=_tid(),
     )
     return _json({"count": len(rows), "requests": rows})
 
@@ -73,10 +93,10 @@ def get_recent_requests(
 @mcp.tool()
 def get_request_detail(request_id: int) -> str:
     """Get full details of a single captured request by ID, including headers, body, and timing."""
-    req = db.get_request_by_id(request_id)
+    req = db.get_request_by_id(request_id, tenant_id=_tid())
     if req is None:
         return _json({"error": "Request not found"})
-    req["tags"] = db.get_tags_for_request(request_id)
+    req["tags"] = db.get_tags_for_request(request_id, tenant_id=_tid())
     return _json(req)
 
 
@@ -90,7 +110,7 @@ def search_requests(
 
     Allowed fields: url, host, path, request_body, response_body, content_type.
     """
-    rows = db.search_requests(pattern=pattern, field=field, limit=limit)
+    rows = db.search_requests(pattern=pattern, field=field, limit=limit, tenant_id=_tid())
     return _json({"count": len(rows), "requests": rows})
 
 
@@ -100,27 +120,27 @@ def get_domain_summary(limit: int = 30) -> str:
 
     Shows request count, methods used, average duration, total bytes, first/last seen.
     """
-    rows = db.get_domain_summary(limit=limit)
+    rows = db.get_domain_summary(limit=limit, tenant_id=_tid())
     return _json({"count": len(rows), "domains": rows})
 
 
 @mcp.tool()
 def get_traffic_stats() -> str:
     """Return overall traffic statistics: total requests, unique hosts, avg duration, total bytes, error count."""
-    return _json(db.get_traffic_stats())
+    return _json(db.get_traffic_stats(tenant_id=_tid()))
 
 
 @mcp.tool()
 def find_errors(limit: int = 50) -> str:
     """Find requests that returned HTTP error status codes (4xx and 5xx)."""
-    rows = db.find_errors(limit=limit)
+    rows = db.find_errors(limit=limit, tenant_id=_tid())
     return _json({"count": len(rows), "errors": rows})
 
 
 @mcp.tool()
 def block_domain(domain: str, reason: str | None = None) -> str:
     """Add a domain to the proxy block list. Future requests will be rejected with 403."""
-    added = db.add_blocked_domain(domain, reason)
+    added = db.add_blocked_domain(domain, reason, tenant_id=_tid())
     status = "blocked" if added else "already_blocked"
     return _json({"status": status, "domain": domain})
 
@@ -128,7 +148,7 @@ def block_domain(domain: str, reason: str | None = None) -> str:
 @mcp.tool()
 def unblock_domain(domain: str) -> str:
     """Remove a domain from the proxy block list."""
-    removed = db.remove_blocked_domain(domain)
+    removed = db.remove_blocked_domain(domain, tenant_id=_tid())
     status = "unblocked" if removed else "not_found"
     return _json({"status": status, "domain": domain})
 
@@ -136,28 +156,28 @@ def unblock_domain(domain: str) -> str:
 @mcp.tool()
 def list_blocked_domains() -> str:
     """List all currently blocked domains."""
-    rows = db.get_all_blocked_domains()
+    rows = db.get_all_blocked_domains(tenant_id=_tid())
     return _json({"count": len(rows), "domains": rows})
 
 
 @mcp.tool()
 def tag_request(request_id: int, tag: str) -> str:
     """Add a descriptive tag/label to a captured request for later reference."""
-    tag_id = db.add_tag(request_id, tag)
+    tag_id = db.add_tag(request_id, tag, tenant_id=_tid())
     return _json({"status": "tagged", "tag_id": tag_id})
 
 
 @mcp.tool()
 def get_request_tags(request_id: int) -> str:
     """Get all tags attached to a specific request."""
-    tags = db.get_tags_for_request(request_id)
+    tags = db.get_tags_for_request(request_id, tenant_id=_tid())
     return _json({"request_id": request_id, "tags": tags})
 
 
 @mcp.tool()
 def analyze_security_headers(request_id: int) -> str:
     """Check a response's security headers (HSTS, CSP, X-Frame-Options, etc.) and report present/missing."""
-    req = db.get_request_by_id(request_id)
+    req = db.get_request_by_id(request_id, tenant_id=_tid())
     if req is None:
         return _json({"error": "Request not found"})
 
@@ -194,7 +214,7 @@ def map_api(host: str | None = None, limit: int = 100) -> str:
     placeholders) to group similar endpoints. Shows methods, status codes,
     hit count, and average duration per endpoint.
     """
-    endpoints = db.get_api_map(host=host, limit=limit)
+    endpoints = db.get_api_map(host=host, limit=limit, tenant_id=_tid())
     return _json({"count": len(endpoints), "endpoints": endpoints})
 
 
@@ -204,7 +224,7 @@ def get_endpoint_detail(host: str, path: str, limit: int = 50) -> str:
 
     Use after map_api to drill into a particular endpoint.
     """
-    rows = db.get_endpoint_detail(host=host, path=path, limit=limit)
+    rows = db.get_endpoint_detail(host=host, path=path, limit=limit, tenant_id=_tid())
     return _json({"count": len(rows), "requests": rows})
 
 
@@ -215,7 +235,7 @@ def get_endpoint_detail(host: str, path: str, limit: int = 50) -> str:
 @mcp.tool()
 def get_ws_connections(limit: int = 50) -> str:
     """List captured WebSocket connections with message counts, bytes transferred, and timestamps."""
-    rows = db.get_ws_connections(limit=limit)
+    rows = db.get_ws_connections(limit=limit, tenant_id=_tid())
     return _json({"count": len(rows), "connections": rows})
 
 
@@ -235,6 +255,7 @@ def get_ws_messages(
     rows = db.get_ws_messages(
         flow_id=flow_id, host=host, direction=direction,
         search=search, limit=limit,
+        tenant_id=_tid(),
     )
     return _json({"count": len(rows), "messages": rows})
 
@@ -242,7 +263,7 @@ def get_ws_messages(
 @mcp.tool()
 def get_ws_stats() -> str:
     """Overall WebSocket statistics: total messages, connections, bytes, send/receive breakdown."""
-    return _json(db.get_ws_stats())
+    return _json(db.get_ws_stats(tenant_id=_tid()))
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +292,7 @@ def get_live_feed(
         after_ws_id=after_ws_id,
         include_bodies=include_bodies,
         limit=limit,
+        tenant_id=_tid(),
     )
     return _json(feed)
 
@@ -287,7 +309,7 @@ def scan_vulnerabilities(limit: int = 500) -> str:
     plaintext credentials over HTTP, exposed sensitive paths (.git, .env, etc.),
     server version disclosure, and stack trace leaks.
     """
-    return _json(db.scan_vulnerabilities(limit=limit))
+    return _json(db.scan_vulnerabilities(limit=limit, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -297,7 +319,7 @@ def detect_pii(limit: int = 500) -> str:
     Detects: email addresses, credit card numbers, SSNs, phone numbers,
     JWTs, AWS access keys, and private keys.
     """
-    return _json(db.detect_pii(limit=limit))
+    return _json(db.detect_pii(limit=limit, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -306,7 +328,7 @@ def extract_session_tokens(limit: int = 300) -> str:
     captured traffic. Finds Authorization headers, session cookies,
     Set-Cookie responses, and JWTs.
     """
-    return _json(db.extract_session_tokens(limit=limit))
+    return _json(db.extract_session_tokens(limit=limit, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -315,7 +337,7 @@ def detect_session_issues(limit: int = 500) -> str:
     tokens on form submissions, and insecure cookie flags (missing
     Secure/HttpOnly/SameSite).
     """
-    return _json(db.detect_session_issues(limit=limit))
+    return _json(db.detect_session_issues(limit=limit, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -325,7 +347,7 @@ def detect_c2_patterns(limit: int = 1000) -> str:
     Identifies hosts with regular-interval requests (low coefficient of
     variation) and suspiciously long encoded query parameters.
     """
-    return _json(db.detect_c2_patterns(limit=limit))
+    return _json(db.detect_c2_patterns(limit=limit, tenant_id=_tid()))
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +359,7 @@ def audit_third_parties(limit: int = 100) -> str:
     """List all external domains contacted, with traffic stats and automatic
     categorization (advertising/tracking, social media, CDN, other).
     """
-    return _json(db.audit_third_parties(limit=limit))
+    return _json(db.audit_third_parties(limit=limit, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -347,7 +369,7 @@ def analyze_cookies(limit: int = 300) -> str:
     Reports category (session, tracking, CSRF, preference), security flags
     (Secure, HttpOnly, SameSite), and frequency.
     """
-    return _json(db.analyze_cookies_in_traffic(limit=limit))
+    return _json(db.analyze_cookies_in_traffic(limit=limit, tenant_id=_tid()))
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +383,7 @@ def compare_requests(id1: int, id2: int) -> str:
     Highlights differences in method, URL, headers, body, status code, and timing.
     Useful for diagnosing why one request succeeds and another fails.
     """
-    return _json(db.compare_requests(id1, id2))
+    return _json(db.compare_requests(id1, id2, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -371,7 +393,7 @@ def generate_openapi_spec(host: str | None = None) -> str:
     Automatically normalizes path parameters (IDs, UUIDs) and groups
     endpoints. Filter by host to generate a spec for a specific API.
     """
-    return _json(db.generate_openapi_spec(host=host))
+    return _json(db.generate_openapi_spec(host=host, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -381,7 +403,7 @@ def analyze_performance(limit: int = 100) -> str:
     Reports: slowest endpoints (with P95 latency), largest payloads,
     redundant/repeated requests, and error-prone endpoints.
     """
-    return _json(db.analyze_performance(limit=limit))
+    return _json(db.analyze_performance(limit=limit, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -390,7 +412,7 @@ def generate_curl(request_id: int) -> str:
 
     Includes method, URL, headers, and body. Ready to paste into a terminal.
     """
-    cmd = db.generate_curl_command(request_id)
+    cmd = db.generate_curl_command(request_id, tenant_id=_tid())
     if not cmd:
         return _json({"error": "Request not found"})
     return _json({"request_id": request_id, "curl": cmd})
@@ -406,7 +428,7 @@ def detect_anomalies(limit: int = 1000) -> str:
     (beyond 3 standard deviations), rare one-off hosts, and error bursts
     (5+ errors in a single minute).
     """
-    return _json(db.detect_anomalies(limit=limit))
+    return _json(db.detect_anomalies(limit=limit, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -416,7 +438,7 @@ def summarize_activity(hours: int = 24) -> str:
     Shows: total requests, unique hosts, bandwidth, top hosts/paths,
     and hourly breakdown.
     """
-    return _json(db.summarize_activity(hours=hours))
+    return _json(db.summarize_activity(hours=hours, tenant_id=_tid()))
 
 
 @mcp.tool()
@@ -425,7 +447,7 @@ def bandwidth_analysis(limit: int = 50) -> str:
 
     Lists the largest individual responses and overall byte totals.
     """
-    return _json(db.bandwidth_analysis(limit=limit))
+    return _json(db.bandwidth_analysis(limit=limit, tenant_id=_tid()))
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +474,7 @@ def replay_request(
     import urllib.request
     import urllib.error
 
-    req = db.get_request_by_id(request_id)
+    req = db.get_request_by_id(request_id, tenant_id=_tid())
     if not req:
         return _json({"error": "Request not found"})
 
@@ -522,6 +544,7 @@ def create_traffic_rule(
         rule_type=rule_type, action=action_dict,
         match_host=match_host, match_path=match_path,
         match_url=match_url, description=description,
+        tenant_id=_tid(),
     )
     return _json({"status": "created", "rule_id": rule_id})
 
@@ -529,23 +552,121 @@ def create_traffic_rule(
 @mcp.tool()
 def list_traffic_rules(include_disabled: bool = False) -> str:
     """List all active traffic manipulation rules."""
-    rules = db.get_traffic_rules(enabled_only=not include_disabled)
+    rules = db.get_traffic_rules(enabled_only=not include_disabled, tenant_id=_tid())
     return _json({"count": len(rules), "rules": rules})
 
 
 @mcp.tool()
 def remove_traffic_rule(rule_id: int) -> str:
     """Remove a traffic manipulation rule by ID."""
-    removed = db.remove_traffic_rule(rule_id)
+    removed = db.remove_traffic_rule(rule_id, tenant_id=_tid())
     return _json({"status": "removed" if removed else "not_found", "rule_id": rule_id})
 
 
 @mcp.tool()
 def toggle_traffic_rule(rule_id: int, enabled: bool) -> str:
     """Enable or disable a traffic rule without deleting it."""
-    toggled = db.toggle_traffic_rule(rule_id, enabled)
+    toggled = db.toggle_traffic_rule(rule_id, enabled, tenant_id=_tid())
     return _json({"status": "updated" if toggled else "not_found",
                   "rule_id": rule_id, "enabled": enabled})
+
+
+# ---------------------------------------------------------------------------
+# Admin Tools (require admin token)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def create_token(name: str) -> str:
+    """Create a new API token for a tenant (admin only).
+
+    Returns the token and tenant_id. The token is used as:
+     - Proxy auth username (for the mitmproxy)
+     - Bearer token (for the MCP SSE endpoint)
+
+    The raw token is shown only once; store it securely.
+    """
+    if not _is_admin.get(False) and db.AUTH_REQUIRED:
+        return _json({"error": "Admin token required for this operation"})
+    result = db.create_token(name)
+    return _json({"status": "created", **result})
+
+
+@mcp.tool()
+def list_tokens() -> str:
+    """List all API tokens with metadata (admin only). Token values are masked."""
+    if not _is_admin.get(False) and db.AUTH_REQUIRED:
+        return _json({"error": "Admin token required for this operation"})
+    tokens = db.list_tokens()
+    return _json({"count": len(tokens), "tokens": tokens})
+
+
+@mcp.tool()
+def revoke_token(token: str) -> str:
+    """Revoke an API token (admin only). Traffic already captured remains."""
+    if not _is_admin.get(False) and db.AUTH_REQUIRED:
+        return _json({"error": "Admin token required for this operation"})
+    revoked = db.revoke_token(token)
+    return _json({"status": "revoked" if revoked else "not_found"})
+
+
+# ---------------------------------------------------------------------------
+# Auth middleware for SSE transport
+# ---------------------------------------------------------------------------
+
+class _AuthMiddleware:
+    """ASGI middleware that validates Bearer tokens on HTTP requests.
+
+    Sets _current_tenant and _is_admin context vars for tool functions.
+    Skips auth when LLMPROXY_AUTH_REQUIRED != '1' (backward compat).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not db.AUTH_REQUIRED:
+            await self.app(scope, receive, send)
+            return
+
+        # Extract token from Authorization header or query string
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+        token = None
+
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+
+        if not token:
+            qs = scope.get("query_string", b"").decode("utf-8", errors="replace")
+            for part in qs.split("&"):
+                if part.startswith("token="):
+                    token = part[6:]
+                    break
+
+        if not token:
+            from starlette.responses import PlainTextResponse
+            resp = PlainTextResponse("Authorization required. Use Bearer token.", status_code=401)
+            await resp(scope, receive, send)
+            return
+
+        # Admin token
+        if db.is_admin_token(token):
+            _current_tenant.set(None)
+            _is_admin.set(True)
+            await self.app(scope, receive, send)
+            return
+
+        # User token
+        tenant_id = db.validate_token(token)
+        if not tenant_id:
+            from starlette.responses import PlainTextResponse
+            resp = PlainTextResponse("Invalid or revoked token.", status_code=401)
+            await resp(scope, receive, send)
+            return
+
+        _current_tenant.set(tenant_id)
+        _is_admin.set(False)
+        await self.app(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------
@@ -553,4 +674,26 @@ def toggle_traffic_rule(rule_id: int, enabled: bool) -> str:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+
+    use_sse = "--transport" in sys.argv and "sse" in sys.argv
+
+    if use_sse and db.AUTH_REQUIRED:
+        # SSE with auth middleware — run via uvicorn
+        import uvicorn
+
+        sse_app = mcp.sse_app()
+        authed_app = _AuthMiddleware(sse_app)
+
+        port = 8000
+        if "--port" in sys.argv:
+            idx = sys.argv.index("--port")
+            if idx + 1 < len(sys.argv):
+                port = int(sys.argv[idx + 1])
+
+        uvicorn.run(authed_app, host="0.0.0.0", port=port)
+    elif use_sse:
+        # SSE without auth — let FastMCP handle it
+        mcp.run(transport="sse")
+    else:
+        mcp.run()

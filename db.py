@@ -12,6 +12,7 @@ import atexit
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,11 @@ IDX_WS = "llmproxy-websocket"
 IDX_BLOCKED = "llmproxy-blocked"
 IDX_TAGS = "llmproxy-tags"
 IDX_RULES = "llmproxy-rules"
+IDX_TOKENS = "llmproxy-tokens"
+
+# Auth config
+ADMIN_TOKEN = os.environ.get("LLMPROXY_ADMIN_TOKEN", "")
+AUTH_REQUIRED = os.environ.get("LLMPROXY_AUTH_REQUIRED", "0") == "1"
 
 # Write buffer config
 _FLUSH_SIZE = int(os.environ.get("LLMPROXY_FLUSH_SIZE", "100"))
@@ -64,27 +70,52 @@ def _get_es() -> Elasticsearch:
     return _es
 
 
-def _wait_for_es(max_wait: int = 60) -> None:
-    """Block until Elasticsearch is reachable (for container startup)."""
-    es = _get_es()
+def _wait_for_es(max_wait: int = 120) -> None:
+    """Block until Elasticsearch is reachable (for container startup).
+
+    Uses a raw HTTP request to /_cluster/health to avoid the elasticsearch-py
+    client's X-Elastic-Product header validation, which can return False during
+    ES startup even when the node is already responding.
+    """
+    import urllib.request
+    import urllib.error
+
+    url = f"{ES_URL}/_cluster/health"
     deadline = time.time() + max_wait
+    attempts = 0
     while time.time() < deadline:
+        attempts += 1
         try:
-            if es.ping():
+            req = urllib.request.urlopen(url, timeout=5)
+            if req.status == 200:
                 return
-        except Exception:
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError):
             pass
-        time.sleep(1)
-    raise ConnectionError(f"Elasticsearch not reachable at {ES_URL} after {max_wait}s")
+        time.sleep(2)
+    raise ConnectionError(f"Elasticsearch not reachable at {ES_URL} after {max_wait}s ({attempts} attempts)")
 
 
 # ---------------------------------------------------------------------------
 # Index mappings
 # ---------------------------------------------------------------------------
 
+_TOKENS_MAPPING = {
+    "mappings": {
+        "properties": {
+            "token":      {"type": "keyword"},
+            "tenant_id":  {"type": "keyword"},
+            "name":       {"type": "text"},
+            "created_at": {"type": "date"},
+            "active":     {"type": "boolean"},
+        }
+    },
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+}
+
 _REQUESTS_MAPPING = {
     "mappings": {
         "properties": {
+            "tenant_id":        {"type": "keyword"},
             "timestamp":        {"type": "date"},
             "method":           {"type": "keyword"},
             "url":              {"type": "text", "fields": {"raw": {"type": "keyword", "ignore_above": 2048}}},
@@ -108,6 +139,7 @@ _REQUESTS_MAPPING = {
 _WS_MAPPING = {
     "mappings": {
         "properties": {
+            "tenant_id":      {"type": "keyword"},
             "timestamp":      {"type": "date"},
             "flow_id":        {"type": "keyword"},
             "host":           {"type": "keyword"},
@@ -124,6 +156,7 @@ _WS_MAPPING = {
 _BLOCKED_MAPPING = {
     "mappings": {
         "properties": {
+            "tenant_id":  {"type": "keyword"},
             "domain":     {"type": "keyword"},
             "reason":     {"type": "text"},
             "created_at": {"type": "date"},
@@ -135,6 +168,7 @@ _BLOCKED_MAPPING = {
 _TAGS_MAPPING = {
     "mappings": {
         "properties": {
+            "tenant_id":  {"type": "keyword"},
             "request_id": {"type": "keyword"},
             "tag":        {"type": "keyword"},
             "created_at": {"type": "date"},
@@ -146,6 +180,7 @@ _TAGS_MAPPING = {
 _RULES_MAPPING = {
     "mappings": {
         "properties": {
+            "tenant_id":   {"type": "keyword"},
             "rule_type":   {"type": "keyword"},
             "match_host":  {"type": "keyword"},
             "match_path":  {"type": "keyword"},
@@ -161,10 +196,17 @@ _RULES_MAPPING = {
 
 
 def init_db():
-    """Create Elasticsearch indices if they don't exist."""
+    """Create Elasticsearch indices if they don't exist.
+
+    Handles race conditions when multiple containers start simultaneously
+    by catching resource_already_exists_exception.
+    """
+    from elasticsearch import BadRequestError
+
     _wait_for_es()
     es = _get_es()
     for idx, mapping in [
+        (IDX_TOKENS, _TOKENS_MAPPING),
         (IDX_REQUESTS, _REQUESTS_MAPPING),
         (IDX_WS, _WS_MAPPING),
         (IDX_BLOCKED, _BLOCKED_MAPPING),
@@ -172,7 +214,13 @@ def init_db():
         (IDX_RULES, _RULES_MAPPING),
     ]:
         if not es.indices.exists(index=idx):
-            es.indices.create(index=idx, body=mapping)
+            try:
+                es.indices.create(index=idx, body=mapping)
+            except BadRequestError as exc:
+                # Another container may have created the index between
+                # our exists() check and this create() call.
+                if "resource_already_exists_exception" not in str(exc):
+                    raise
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +255,148 @@ def _count(index: str, body: dict | None = None) -> int:
 def _refresh(index: str) -> None:
     """Force refresh so writes are immediately searchable."""
     _get_es().indices.refresh(index=index)
+
+
+def _tenant_must(tenant_id: str | None) -> list[dict]:
+    """Return ES must-clause list to scope queries by tenant."""
+    if tenant_id:
+        return [{"term": {"tenant_id": tenant_id}}]
+    return []
+
+
+def _tenant_query(tenant_id: str | None, extra_must: list[dict] | None = None) -> dict:
+    """Build an ES query dict scoped by tenant, with optional extra filters."""
+    must = _tenant_must(tenant_id)
+    if extra_must:
+        must.extend(extra_must)
+    if must:
+        return {"bool": {"must": must}}
+    return {"match_all": {}}
+
+
+# ---------------------------------------------------------------------------
+# Token management
+# ---------------------------------------------------------------------------
+
+# In-memory token cache to avoid hitting ES on every request
+_token_cache: dict[str, str] = {}  # token → tenant_id
+_token_cache_lock = threading.Lock()
+_token_cache_loaded_at: float = 0
+_TOKEN_CACHE_TTL = 30.0  # seconds
+
+
+def _load_token_cache() -> None:
+    """Reload the full token cache from ES."""
+    global _token_cache_loaded_at
+    try:
+        es = _get_es()
+        resp = es.search(
+            index=IDX_TOKENS,
+            body={"query": {"term": {"active": True}}, "size": 10000},
+        )
+        new_cache: dict[str, str] = {}
+        for hit in resp["hits"]["hits"]:
+            src = hit["_source"]
+            new_cache[src["token"]] = src["tenant_id"]
+        with _token_cache_lock:
+            _token_cache.clear()
+            _token_cache.update(new_cache)
+            _token_cache_loaded_at = time.time()
+    except Exception:
+        pass  # keep stale cache on error
+
+
+def create_token(name: str) -> dict:
+    """Create a new API token. Returns {token, tenant_id, name}."""
+    token = secrets.token_hex(32)
+    tenant_id = secrets.token_hex(16)
+    doc = {
+        "token": token,
+        "tenant_id": tenant_id,
+        "name": name,
+        "created_at": _now_iso(),
+        "active": True,
+    }
+    es = _get_es()
+    es.index(index=IDX_TOKENS, body=doc, refresh="wait_for")
+    with _token_cache_lock:
+        _token_cache[token] = tenant_id
+    return {"token": token, "tenant_id": tenant_id, "name": name}
+
+
+def validate_token(token: str) -> str | None:
+    """Validate a token and return its tenant_id, or None if invalid."""
+    # Check admin token first
+    if ADMIN_TOKEN and token == ADMIN_TOKEN:
+        return None  # admin has no tenant_id → sees everything
+
+    # Check cache freshness
+    if time.time() - _token_cache_loaded_at > _TOKEN_CACHE_TTL:
+        _load_token_cache()
+
+    with _token_cache_lock:
+        tenant_id = _token_cache.get(token)
+    if tenant_id:
+        return tenant_id
+
+    # Cache miss — query ES directly
+    try:
+        es = _get_es()
+        resp = es.search(
+            index=IDX_TOKENS,
+            body={"query": {"bool": {"must": [
+                {"term": {"token": token}},
+                {"term": {"active": True}},
+            ]}}},
+            size=1,
+        )
+        hits = resp["hits"]["hits"]
+        if hits:
+            tid = hits[0]["_source"]["tenant_id"]
+            with _token_cache_lock:
+                _token_cache[token] = tid
+            return tid
+    except Exception:
+        pass
+    return None
+
+
+def is_admin_token(token: str) -> bool:
+    """Check if a token is the admin token."""
+    return bool(ADMIN_TOKEN) and token == ADMIN_TOKEN
+
+
+def revoke_token(token: str) -> bool:
+    """Revoke (deactivate) a token. Returns True if found and revoked."""
+    es = _get_es()
+    resp = es.search(
+        index=IDX_TOKENS,
+        body={"query": {"term": {"token": token}}},
+        size=1,
+    )
+    hits = resp["hits"]["hits"]
+    if not hits:
+        return False
+    es.update(
+        index=IDX_TOKENS, id=hits[0]["_id"],
+        body={"doc": {"active": False}},
+        refresh="wait_for",
+    )
+    with _token_cache_lock:
+        _token_cache.pop(token, None)
+    return True
+
+
+def list_tokens() -> list[dict]:
+    """List all tokens (admin only). Returns token metadata without the raw token value."""
+    body = {"query": {"match_all": {}}, "sort": [{"created_at": "desc"}]}
+    results = _search(IDX_TOKENS, body, size=1000)
+    # Mask token values — show only first/last 4 chars
+    for r in results:
+        t = r.get("token", "")
+        if len(t) > 8:
+            r["token"] = t[:4] + "…" + t[-4:]
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -274,9 +464,11 @@ def insert_request(
     content_type: str | None = None,
     content_length: int | None = None,
     duration_ms: float | None = None,
+    tenant_id: str | None = None,
 ) -> int:
     """Buffer a captured request for batch insert. Returns 0 (ID assigned at flush)."""
     doc = {
+        "tenant_id": tenant_id,
         "timestamp": _now_iso(),
         "method": method,
         "url": url,
@@ -321,9 +513,11 @@ def insert_request_immediate(
     content_type: str | None = None,
     content_length: int | None = None,
     duration_ms: float | None = None,
+    tenant_id: str | None = None,
 ) -> str:
     """Insert a single request immediately. Returns document ID."""
     doc = {
+        "tenant_id": tenant_id,
         "timestamp": _now_iso(),
         "method": method, "url": url, "host": host, "path": path,
         "port": port, "scheme": scheme,
@@ -338,12 +532,13 @@ def insert_request_immediate(
     return resp["_id"]
 
 
-def is_domain_blocked(domain: str) -> tuple[bool, str | None]:
+def is_domain_blocked(domain: str, tenant_id: str | None = None) -> tuple[bool, str | None]:
     """Check whether a domain is on the block list."""
     es = _get_es()
+    must = [{"term": {"domain": domain}}] + _tenant_must(tenant_id)
     resp = es.search(
         index=IDX_BLOCKED,
-        body={"query": {"term": {"domain": domain}}},
+        body={"query": {"bool": {"must": must}}},
         size=1,
     )
     hits = resp["hits"]["hits"]
@@ -352,15 +547,16 @@ def is_domain_blocked(domain: str) -> tuple[bool, str | None]:
     return False, None
 
 
-def add_blocked_domain(domain: str, reason: str | None = None) -> bool:
+def add_blocked_domain(domain: str, reason: str | None = None, tenant_id: str | None = None) -> bool:
     """Add a domain to the block list. Returns True if newly added."""
     es = _get_es()
-    # Use domain as doc ID to enforce uniqueness
-    doc_id = f"block-{domain}"
+    # Use domain + tenant as doc ID to enforce uniqueness per tenant
+    tid = tenant_id or "_global"
+    doc_id = f"block-{tid}-{domain}"
     try:
         es.create(
             index=IDX_BLOCKED, id=doc_id,
-            body={"domain": domain, "reason": reason, "created_at": _now_iso()},
+            body={"tenant_id": tenant_id, "domain": domain, "reason": reason, "created_at": _now_iso()},
             refresh="wait_for",
         )
         return True
@@ -368,10 +564,11 @@ def add_blocked_domain(domain: str, reason: str | None = None) -> bool:
         return False
 
 
-def remove_blocked_domain(domain: str) -> bool:
+def remove_blocked_domain(domain: str, tenant_id: str | None = None) -> bool:
     """Remove a domain from the block list."""
     es = _get_es()
-    doc_id = f"block-{domain}"
+    tid = tenant_id or "_global"
+    doc_id = f"block-{tid}-{domain}"
     try:
         es.delete(index=IDX_BLOCKED, id=doc_id, refresh="wait_for")
         return True
@@ -394,10 +591,11 @@ def get_recent_requests(
     host: str | None = None,
     status_code: int | None = None,
     search: str | None = None,
+    tenant_id: str | None = None,
 ) -> list[dict]:
     """Return recent requests with optional filters."""
     _flush_buffer()
-    must: list[dict] = []
+    must: list[dict] = _tenant_must(tenant_id)
     if method:
         must.append({"term": {"method": method.upper()}})
     if host:
@@ -417,22 +615,27 @@ def get_recent_requests(
     return _search(IDX_REQUESTS, body, size=min(limit, 200))
 
 
-def get_request_by_id(request_id: str | int) -> dict | None:
+def get_request_by_id(request_id: str | int, tenant_id: str | None = None) -> dict | None:
     """Return full details of a single request by ES document ID."""
     _flush_buffer()
     es = _get_es()
     try:
         resp = es.get(index=IDX_REQUESTS, id=str(request_id))
-        return _hit_to_dict(resp)
+        doc = _hit_to_dict(resp)
+        # Verify tenant ownership if tenant_id is set
+        if tenant_id and doc.get("tenant_id") != tenant_id:
+            return None
+        return doc
     except NotFoundError:
         return None
 
 
-def get_domain_summary(limit: int = 30) -> list[dict]:
+def get_domain_summary(limit: int = 30, tenant_id: str | None = None) -> list[dict]:
     """Aggregate traffic stats per domain."""
     _flush_buffer()
     body = {
         "size": 0,
+        "query": _tenant_query(tenant_id),
         "aggs": {
             "by_host": {
                 "terms": {"field": "host", "size": limit, "order": {"_count": "desc"}},
@@ -464,11 +667,12 @@ def get_domain_summary(limit: int = 30) -> list[dict]:
     return results
 
 
-def get_traffic_stats() -> dict:
+def get_traffic_stats(tenant_id: str | None = None) -> dict:
     """Return overall traffic statistics."""
     _flush_buffer()
     body = {
         "size": 0,
+        "query": _tenant_query(tenant_id),
         "aggs": {
             "unique_hosts": {"cardinality": {"field": "host"}},
             "distinct_methods": {"cardinality": {"field": "method"}},
@@ -496,11 +700,12 @@ def get_traffic_stats() -> dict:
     }
 
 
-def find_errors(limit: int = 50) -> list[dict]:
+def find_errors(limit: int = 50, tenant_id: str | None = None) -> list[dict]:
     """Find requests with HTTP error status codes (4xx/5xx)."""
     _flush_buffer()
+    must = _tenant_must(tenant_id) + [{"range": {"status_code": {"gte": 400}}}]
     body = {
-        "query": {"range": {"status_code": {"gte": 400}}},
+        "query": {"bool": {"must": must}},
         "sort": [{"timestamp": "desc"}],
         "_source": ["timestamp", "method", "url", "host", "status_code",
                      "content_type", "duration_ms"],
@@ -512,6 +717,7 @@ def search_requests(
     pattern: str,
     field: str = "url",
     limit: int = 50,
+    tenant_id: str | None = None,
 ) -> list[dict]:
     """Search requests by pattern on a given field."""
     allowed_fields = {"url", "host", "path", "request_body", "response_body", "content_type"}
@@ -527,8 +733,9 @@ def search_requests(
     else:
         q = {"match_phrase": {field: pattern}}
 
+    must = _tenant_must(tenant_id) + [q]
     body = {
-        "query": q,
+        "query": {"bool": {"must": must}},
         "sort": [{"timestamp": "desc"}],
         "_source": ["timestamp", "method", "url", "host", "status_code",
                      "content_type", "content_length", "duration_ms"],
@@ -536,23 +743,24 @@ def search_requests(
     return _search(IDX_REQUESTS, body, size=limit)
 
 
-def get_all_blocked_domains() -> list[dict]:
+def get_all_blocked_domains(tenant_id: str | None = None) -> list[dict]:
     """Return all blocked domains."""
-    body = {"query": {"match_all": {}}, "sort": [{"created_at": "desc"}]}
+    body = {"query": _tenant_query(tenant_id), "sort": [{"created_at": "desc"}]}
     return _search(IDX_BLOCKED, body, size=1000)
 
 
-def add_tag(request_id: str | int, tag: str) -> str:
+def add_tag(request_id: str | int, tag: str, tenant_id: str | None = None) -> str:
     """Tag a request. Returns tag doc ID."""
     es = _get_es()
-    doc = {"request_id": str(request_id), "tag": tag, "created_at": _now_iso()}
+    doc = {"tenant_id": tenant_id, "request_id": str(request_id), "tag": tag, "created_at": _now_iso()}
     resp = es.index(index=IDX_TAGS, body=doc, refresh="wait_for")
     return resp["_id"]
 
 
-def get_tags_for_request(request_id: str | int) -> list[str]:
+def get_tags_for_request(request_id: str | int, tenant_id: str | None = None) -> list[str]:
     """Return tags for a request."""
-    body = {"query": {"term": {"request_id": str(request_id)}}}
+    must = _tenant_must(tenant_id) + [{"term": {"request_id": str(request_id)}}]
+    body = {"query": {"bool": {"must": must}}}
     hits = _search(IDX_TAGS, body, size=100)
     return [h["tag"] for h in hits]
 
@@ -609,9 +817,11 @@ def insert_ws_message(
     message_type: str,
     content: str | None = None,
     content_length: int | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     """Buffer a WebSocket message for batch insert."""
     doc = {
+        "tenant_id": tenant_id,
         "timestamp": _now_iso(),
         "flow_id": flow_id, "host": host, "url": url,
         "direction": direction, "message_type": message_type,
@@ -631,11 +841,12 @@ def insert_ws_message(
 # WebSocket query helpers
 # ---------------------------------------------------------------------------
 
-def get_ws_connections(limit: int = 50) -> list[dict]:
+def get_ws_connections(limit: int = 50, tenant_id: str | None = None) -> list[dict]:
     """List distinct WebSocket connections with message counts."""
     _flush_ws_buffer()
     body = {
         "size": 0,
+        "query": _tenant_query(tenant_id),
         "aggs": {
             "by_flow": {
                 "terms": {"field": "flow_id", "size": limit, "order": {"last_msg": "desc"}},
@@ -675,10 +886,11 @@ def get_ws_messages(
     direction: str | None = None,
     search: str | None = None,
     limit: int = 100,
+    tenant_id: str | None = None,
 ) -> list[dict]:
     """Return WebSocket messages with optional filters."""
     _flush_ws_buffer()
-    must: list[dict] = []
+    must: list[dict] = _tenant_must(tenant_id)
     if flow_id:
         must.append({"term": {"flow_id": flow_id}})
     if host:
@@ -693,11 +905,12 @@ def get_ws_messages(
     return _search(IDX_WS, body, size=min(limit, 500))
 
 
-def get_ws_stats() -> dict:
+def get_ws_stats(tenant_id: str | None = None) -> dict:
     """Return overall WebSocket statistics."""
     _flush_ws_buffer()
     body = {
         "size": 0,
+        "query": _tenant_query(tenant_id),
         "aggs": {
             "total_connections": {"cardinality": {"field": "flow_id"}},
             "unique_hosts": {"cardinality": {"field": "host"}},
@@ -747,10 +960,10 @@ def _normalize_path(path: str) -> str:
     return "/".join(normalized)
 
 
-def get_api_map(host: str | None = None, limit: int = 100) -> list[dict]:
+def get_api_map(host: str | None = None, limit: int = 100, tenant_id: str | None = None) -> list[dict]:
     """Map discovered API endpoints grouped by normalized path."""
     _flush_buffer()
-    must: list[dict] = []
+    must: list[dict] = _tenant_must(tenant_id)
     if host:
         must.append({"wildcard": {"host": f"*{host.lower()}*"}})
     query = {"bool": {"must": must}} if must else {"match_all": {}}
@@ -811,14 +1024,15 @@ def get_api_map(host: str | None = None, limit: int = 100) -> list[dict]:
     return result
 
 
-def get_endpoint_detail(host: str, path: str, limit: int = 50) -> list[dict]:
+def get_endpoint_detail(host: str, path: str, limit: int = 50, tenant_id: str | None = None) -> list[dict]:
     """Get recent requests for a specific host + path combination."""
     _flush_buffer()
+    must = _tenant_must(tenant_id) + [
+        {"wildcard": {"host": f"*{host.lower()}*"}},
+        {"wildcard": {"path.raw": f"*{path}*"}},
+    ]
     body = {
-        "query": {"bool": {"must": [
-            {"wildcard": {"host": f"*{host.lower()}*"}},
-            {"wildcard": {"path.raw": f"*{path}*"}},
-        ]}},
+        "query": {"bool": {"must": must}},
         "sort": [{"timestamp": "desc"}],
         "_source": ["timestamp", "method", "url", "host", "path",
                      "status_code", "content_type", "content_length", "duration_ms"],
@@ -835,6 +1049,7 @@ def get_live_feed(
     after_ws_id: str | int | None = None,
     include_bodies: bool = False,
     limit: int = 100,
+    tenant_id: str | None = None,
 ) -> dict:
     """Return new HTTP requests and WebSocket messages since given cursors.
 
@@ -849,16 +1064,19 @@ def get_live_feed(
         "content_type", "content_length", "duration_ms",
     ]
 
+    t_must = _tenant_must(tenant_id)
+
     if after_id is not None:
+        must = t_must + [{"range": {"timestamp": {"gt": str(after_id)}}}]
         body = {
-            "query": {"range": {"timestamp": {"gt": str(after_id)}}},
+            "query": {"bool": {"must": must}},
             "sort": [{"timestamp": "asc"}],
         }
         if source_fields:
             body["_source"] = source_fields
         http_rows = _search(IDX_REQUESTS, body, size=cap)
     else:
-        body = {"query": {"match_all": {}}, "sort": [{"timestamp": "desc"}]}
+        body = {"query": _tenant_query(tenant_id), "sort": [{"timestamp": "desc"}]}
         if source_fields:
             body["_source"] = source_fields
         http_rows = _search(IDX_REQUESTS, body, size=cap)
@@ -867,13 +1085,14 @@ def get_live_feed(
     new_http_cursor = http_rows[-1]["timestamp"] if http_rows else after_id
 
     if after_ws_id is not None:
+        ws_must = t_must + [{"range": {"timestamp": {"gt": str(after_ws_id)}}}]
         ws_body = {
-            "query": {"range": {"timestamp": {"gt": str(after_ws_id)}}},
+            "query": {"bool": {"must": ws_must}},
             "sort": [{"timestamp": "asc"}],
         }
         ws_rows = _search(IDX_WS, ws_body, size=cap)
     else:
-        ws_body = {"query": {"match_all": {}}, "sort": [{"timestamp": "desc"}]}
+        ws_body = {"query": _tenant_query(tenant_id), "sort": [{"timestamp": "desc"}]}
         ws_rows = _search(IDX_WS, ws_body, size=cap)
         ws_rows.reverse()
 
@@ -942,11 +1161,11 @@ _AUTH_HEADERS = (
 _SESSION_COOKIE_NAMES = ("session", "token", "auth", "jwt", "sid", "csrf", "xsrf")
 
 
-def scan_vulnerabilities(limit: int = 500) -> dict:
+def scan_vulnerabilities(limit: int = 500, tenant_id: str | None = None) -> dict:
     """Scan captured traffic for common vulnerability indicators."""
     _flush_buffer()
     body = {
-        "query": {"match_all": {}},
+        "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
     }
     rows = _search(IDX_REQUESTS, body, size=min(limit, 2000))
@@ -1002,11 +1221,11 @@ def scan_vulnerabilities(limit: int = 500) -> dict:
             "by_severity": sev, "findings": findings}
 
 
-def detect_pii(limit: int = 500) -> dict:
+def detect_pii(limit: int = 500, tenant_id: str | None = None) -> dict:
     """Scan request/response bodies and URLs for PII patterns."""
     _flush_buffer()
     body = {
-        "query": {"match_all": {}},
+        "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
         "_source": ["url", "host", "method", "request_body", "response_body"],
     }
@@ -1038,11 +1257,11 @@ def detect_pii(limit: int = 500) -> dict:
             "by_type": by_type, "findings": findings}
 
 
-def extract_session_tokens(limit: int = 300) -> dict:
+def extract_session_tokens(limit: int = 300, tenant_id: str | None = None) -> dict:
     """Extract authentication tokens, session cookies, and API keys from traffic."""
     _flush_buffer()
     body = {
-        "query": {"match_all": {}},
+        "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
         "_source": ["url", "host", "request_headers", "response_headers"],
     }
@@ -1093,11 +1312,11 @@ def extract_session_tokens(limit: int = 300) -> dict:
     return {"total_scanned": len(rows), "tokens_found": len(tokens), "tokens": tokens}
 
 
-def detect_session_issues(limit: int = 500) -> dict:
+def detect_session_issues(limit: int = 500, tenant_id: str | None = None) -> dict:
     """Detect session anomalies: cross-host cookies, missing CSRF, insecure flags."""
     _flush_buffer()
     body = {
-        "query": {"match_all": {}},
+        "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
         "_source": ["url", "host", "method", "request_headers", "response_headers"],
     }
@@ -1161,11 +1380,11 @@ def detect_session_issues(limit: int = 500) -> dict:
     return {"total_scanned": len(rows), "issues_count": len(issues), "issues": issues}
 
 
-def detect_c2_patterns(limit: int = 1000) -> dict:
+def detect_c2_patterns(limit: int = 1000, tenant_id: str | None = None) -> dict:
     """Detect potential C2 beaconing patterns and encoded payloads."""
     _flush_buffer()
     body = {
-        "query": {"match_all": {}},
+        "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "asc"}],
         "_source": ["host", "timestamp", "url", "method", "content_type", "content_length"],
     }
@@ -1250,11 +1469,12 @@ _CDN_PATTERN = re.compile(
 )
 
 
-def audit_third_parties(limit: int = 100) -> dict:
+def audit_third_parties(limit: int = 100, tenant_id: str | None = None) -> dict:
     """List all external domains contacted with traffic stats and categorization."""
     _flush_buffer()
     body = {
         "size": 0,
+        "query": _tenant_query(tenant_id),
         "aggs": {
             "by_host": {
                 "terms": {
@@ -1299,11 +1519,11 @@ def audit_third_parties(limit: int = 100) -> dict:
     return {"total_domains": len(results), "domains": results}
 
 
-def analyze_cookies_in_traffic(limit: int = 300) -> dict:
+def analyze_cookies_in_traffic(limit: int = 300, tenant_id: str | None = None) -> dict:
     """Parse and categorize all cookies from Set-Cookie headers."""
     _flush_buffer()
     body = {
-        "query": {"match_all": {}},
+        "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
         "_source": ["host", "request_headers", "response_headers"],
     }
@@ -1368,11 +1588,11 @@ def analyze_cookies_in_traffic(limit: int = 300) -> dict:
 # Debugging & development
 # ---------------------------------------------------------------------------
 
-def compare_requests(id1: str | int, id2: str | int) -> dict:
+def compare_requests(id1: str | int, id2: str | int, tenant_id: str | None = None) -> dict:
     """Compare two requests side-by-side, highlighting differences."""
     _flush_buffer()
-    r1 = get_request_by_id(id1)
-    r2 = get_request_by_id(id2)
+    r1 = get_request_by_id(id1, tenant_id=tenant_id)
+    r2 = get_request_by_id(id2, tenant_id=tenant_id)
     if not r1 or not r2:
         missing = str(id1) if not r1 else str(id2)
         return {"error": f"Request #{missing} not found"}
@@ -1411,10 +1631,10 @@ def compare_requests(id1: str | int, id2: str | int) -> dict:
     }
 
 
-def generate_openapi_spec(host: str | None = None) -> dict:
+def generate_openapi_spec(host: str | None = None, tenant_id: str | None = None) -> dict:
     """Generate an OpenAPI 3.0 spec from observed traffic patterns."""
     _flush_buffer()
-    must: list[dict] = []
+    must: list[dict] = _tenant_must(tenant_id)
     if host:
         must.append({"wildcard": {"host": f"*{host.lower()}*"}})
     query = {"bool": {"must": must}} if must else {"match_all": {}}
@@ -1475,14 +1695,16 @@ def generate_openapi_spec(host: str | None = None) -> dict:
     }
 
 
-def analyze_performance(limit: int = 100) -> dict:
+def analyze_performance(limit: int = 100, tenant_id: str | None = None) -> dict:
     """Find slow endpoints, large payloads, redundant requests, and error hotspots."""
     _flush_buffer()
     es = _get_es()
+    tq = _tenant_query(tenant_id)
 
     # Slow endpoints
     slow_body = {
         "size": 0,
+        "query": tq,
         "aggs": {
             "by_endpoint": {
                 "multi_terms": {
@@ -1515,8 +1737,9 @@ def analyze_performance(limit: int = 100) -> dict:
             })
 
     # Large payloads
+    large_must = _tenant_must(tenant_id) + [{"exists": {"field": "content_length"}}]
     large = _search(IDX_REQUESTS, {
-        "query": {"exists": {"field": "content_length"}},
+        "query": {"bool": {"must": large_must}},
         "sort": [{"content_length": "desc"}],
         "_source": ["url", "host", "method", "content_type", "content_length", "duration_ms"],
     }, size=20)
@@ -1524,6 +1747,7 @@ def analyze_performance(limit: int = 100) -> dict:
     # Redundant requests
     redundant_body = {
         "size": 0,
+        "query": tq,
         "aggs": {
             "by_url_method": {
                 "multi_terms": {
@@ -1542,6 +1766,7 @@ def analyze_performance(limit: int = 100) -> dict:
     # Error-prone endpoints
     err_body = {
         "size": 0,
+        "query": tq,
         "aggs": {
             "by_endpoint": {
                 "multi_terms": {
@@ -1578,9 +1803,9 @@ def analyze_performance(limit: int = 100) -> dict:
     }
 
 
-def generate_curl_command(request_id: str | int) -> str:
+def generate_curl_command(request_id: str | int, tenant_id: str | None = None) -> str:
     """Generate a curl command that reproduces a captured request."""
-    req = get_request_by_id(request_id)
+    req = get_request_by_id(request_id, tenant_id=tenant_id)
     if not req:
         return ""
     parts = [f"curl -X {req.get('method', 'GET')}"]
@@ -1601,14 +1826,16 @@ def generate_curl_command(request_id: str | int) -> str:
 # Monitoring & analysis
 # ---------------------------------------------------------------------------
 
-def detect_anomalies(limit: int = 1000) -> dict:
+def detect_anomalies(limit: int = 1000, tenant_id: str | None = None) -> dict:
     """Detect unusual traffic patterns: status spikes, timing outliers, rare hosts."""
     _flush_buffer()
     es = _get_es()
+    tq = _tenant_query(tenant_id)
 
     # Status distribution
     status_body = {
         "size": 0,
+        "query": tq,
         "aggs": {
             "by_status": {
                 "terms": {"field": "status_code", "size": 50, "order": {"_count": "desc"}}
@@ -1622,6 +1849,7 @@ def detect_anomalies(limit: int = 1000) -> dict:
     # Timing stats
     stats_body = {
         "size": 0,
+        "query": tq,
         "aggs": {
             "avg_dur": {"avg": {"field": "duration_ms"}},
             "sd_dur": {"extended_stats": {"field": "duration_ms"}},
@@ -1634,8 +1862,9 @@ def detect_anomalies(limit: int = 1000) -> dict:
 
     outliers = []
     if threshold > 0:
+        outlier_must = _tenant_must(tenant_id) + [{"range": {"duration_ms": {"gt": threshold}}}]
         outliers = _search(IDX_REQUESTS, {
-            "query": {"range": {"duration_ms": {"gt": threshold}}},
+            "query": {"bool": {"must": outlier_must}},
             "sort": [{"duration_ms": "desc"}],
             "_source": ["url", "host", "method", "duration_ms", "status_code"],
         }, size=20)
@@ -1643,6 +1872,7 @@ def detect_anomalies(limit: int = 1000) -> dict:
     # Rare hosts
     rare_body = {
         "size": 0,
+        "query": tq,
         "aggs": {
             "by_host": {
                 "terms": {"field": "host", "size": 100, "order": {"_count": "asc"}},
@@ -1657,9 +1887,10 @@ def detect_anomalies(limit: int = 1000) -> dict:
                   if b["doc_count"] <= 2][:30]
 
     # Error bursts
+    err_must = _tenant_must(tenant_id) + [{"range": {"status_code": {"gte": 400}}}]
     err_burst_body = {
         "size": 0,
-        "query": {"range": {"status_code": {"gte": 400}}},
+        "query": {"bool": {"must": err_must}},
         "aggs": {
             "by_minute": {
                 "date_histogram": {"field": "timestamp", "calendar_interval": "minute"},
@@ -1687,13 +1918,14 @@ def detect_anomalies(limit: int = 1000) -> dict:
     }
 
 
-def summarize_activity(hours: int = 24) -> dict:
+def summarize_activity(hours: int = 24, tenant_id: str | None = None) -> dict:
     """High-level activity summary for a given time window."""
     _flush_buffer()
     es = _get_es()
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
-    range_q = {"range": {"timestamp": {"gte": cutoff}}}
+    range_must = _tenant_must(tenant_id) + [{"range": {"timestamp": {"gte": cutoff}}}]
+    range_q = {"bool": {"must": range_must}}
 
     overview_body = {
         "size": 0,
@@ -1765,13 +1997,15 @@ def summarize_activity(hours: int = 24) -> dict:
     }
 
 
-def bandwidth_analysis(limit: int = 50) -> dict:
+def bandwidth_analysis(limit: int = 50, tenant_id: str | None = None) -> dict:
     """Identify top bandwidth consumers by host and content type."""
     _flush_buffer()
     es = _get_es()
+    tq = _tenant_query(tenant_id)
 
     host_body = {
         "size": 0,
+        "query": tq,
         "aggs": {"by_host": {
             "terms": {"field": "host", "size": min(limit, 100), "order": {"total": "desc"}},
             "aggs": {
@@ -1787,6 +2021,7 @@ def bandwidth_analysis(limit: int = 50) -> dict:
 
     type_body = {
         "size": 0,
+        "query": tq,
         "aggs": {"by_type": {
             "terms": {"field": "content_type", "size": 20, "order": {"total": "desc"}},
             "aggs": {
@@ -1800,13 +2035,14 @@ def bandwidth_analysis(limit: int = 50) -> dict:
                 "requests": b["doc_count"], "avg_bytes": b["avg"]["value"]}
                for b in t_resp["aggregations"]["by_type"]["buckets"]]
 
+    largest_must = _tenant_must(tenant_id) + [{"exists": {"field": "content_length"}}]
     largest = _search(IDX_REQUESTS, {
-        "query": {"exists": {"field": "content_length"}},
+        "query": {"bool": {"must": largest_must}},
         "sort": [{"content_length": "desc"}],
         "_source": ["url", "host", "content_type", "content_length"],
     }, size=20)
 
-    total_body = {"size": 0, "aggs": {"total": {"sum": {"field": "content_length"}}}}
+    total_body = {"size": 0, "query": tq, "aggs": {"total": {"sum": {"field": "content_length"}}}}
     total_resp = es.search(index=IDX_REQUESTS, body=total_body)
     total_bytes = total_resp["aggregations"]["total"]["value"]
 
@@ -1829,9 +2065,11 @@ def add_traffic_rule(
     match_path: str | None = None,
     match_url: str | None = None,
     description: str | None = None,
+    tenant_id: str | None = None,
 ) -> str:
     """Add a traffic manipulation rule. Returns rule ID."""
     doc = {
+        "tenant_id": tenant_id,
         "rule_type": rule_type,
         "match_host": match_host, "match_path": match_path, "match_url": match_url,
         "action": action, "description": description,
@@ -1842,30 +2080,39 @@ def add_traffic_rule(
     return resp["_id"]
 
 
-def get_traffic_rules(enabled_only: bool = True) -> list[dict]:
+def get_traffic_rules(enabled_only: bool = True, tenant_id: str | None = None) -> list[dict]:
     """List traffic manipulation rules."""
+    must: list[dict] = _tenant_must(tenant_id)
     if enabled_only:
-        query = {"term": {"enabled": True}}
-    else:
-        query = {"match_all": {}}
+        must.append({"term": {"enabled": True}})
+    query = {"bool": {"must": must}} if must else {"match_all": {}}
     body = {"query": query, "sort": [{"created_at": "desc"}]}
     return _search(IDX_RULES, body, size=1000)
 
 
-def remove_traffic_rule(rule_id: str | int) -> bool:
+def remove_traffic_rule(rule_id: str | int, tenant_id: str | None = None) -> bool:
     """Remove a traffic rule by ID."""
     es = _get_es()
     try:
+        if tenant_id:
+            # Verify ownership before deleting
+            doc = es.get(index=IDX_RULES, id=str(rule_id))
+            if doc["_source"].get("tenant_id") != tenant_id:
+                return False
         es.delete(index=IDX_RULES, id=str(rule_id), refresh="wait_for")
         return True
     except NotFoundError:
         return False
 
 
-def toggle_traffic_rule(rule_id: str | int, enabled: bool) -> bool:
+def toggle_traffic_rule(rule_id: str | int, enabled: bool, tenant_id: str | None = None) -> bool:
     """Enable or disable a traffic rule."""
     es = _get_es()
     try:
+        if tenant_id:
+            doc = es.get(index=IDX_RULES, id=str(rule_id))
+            if doc["_source"].get("tenant_id") != tenant_id:
+                return False
         es.update(index=IDX_RULES, id=str(rule_id),
                   body={"doc": {"enabled": enabled}}, refresh="wait_for")
         return True

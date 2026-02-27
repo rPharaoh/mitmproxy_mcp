@@ -10,10 +10,17 @@ Environment variables:
     LLMPROXY_ES_URL       Elasticsearch URL (default: http://elasticsearch:9200)
     LLMPROXY_MAX_BODY     Max response body size to store in bytes (default: 512 KB)
     LLMPROXY_CAPTURE_BODY Set to "0" to skip storing bodies entirely
+    LLMPROXY_AUTH_REQUIRED Set to "1" to require proxy auth (token-based multi-tenant)
+
+Proxy Authentication (multi-tenant):
+    When LLMPROXY_AUTH_REQUIRED=1, users must configure proxy auth.
+    Username = their API token, password = anything.
+    Traffic is tagged with the tenant_id associated with the token.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -63,10 +70,14 @@ class TrafficCapture:
     def __init__(self):
         db.init_db()
         self._flow_start: dict[str, float] = {}
+        self._flow_tenant: dict[str, str | None] = {}   # flow_id → tenant_id
         self._rules: list[dict] = []
         self._rules_loaded_at: float = 0
         self._RULES_RELOAD_SEC = 5.0
+        self._auth_required = db.AUTH_REQUIRED
         ctx.log.info("[LLMProxy] Addon loaded – capturing traffic to " + db.ES_URL)
+        if self._auth_required:
+            ctx.log.info("[LLMProxy] Auth REQUIRED – proxy auth enforced")
 
     def done(self):
         """Flush buffered writes on proxy shutdown."""
@@ -97,13 +108,68 @@ class TrafficCapture:
                     return False
         return True
 
+    # -- Proxy auth helpers --------------------------------------------------
+
+    def _extract_tenant(self, flow: http.HTTPFlow) -> str | None:
+        """Extract tenant_id from Proxy-Authorization header.
+
+        Username = API token, password = ignored.
+        Returns tenant_id if valid, None for admin or no-auth mode.
+        Sends 407 and returns sentinel '_reject' if auth is required but invalid.
+        """
+        auth_header = flow.request.headers.get("proxy-authorization", "")
+
+        if auth_header.lower().startswith("basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode("utf-8", errors="replace")
+                token = decoded.split(":", 1)[0]  # username is the token
+            except Exception:
+                token = ""
+        else:
+            token = ""
+
+        # Strip the proxy-auth header so it doesn't reach the upstream server
+        flow.request.headers.pop("proxy-authorization", None)
+
+        if not token:
+            if self._auth_required:
+                flow.response = http.Response.make(
+                    407,
+                    b"Proxy authentication required. Set proxy username to your API token.",
+                    {"Content-Type": "text/plain", "Proxy-Authenticate": "Basic realm=\"LLMProxy\""},
+                )
+                return "_reject"
+            return None  # no auth required, no tenant scoping
+
+        # Admin token → no tenant scoping (sees everything, but don't store without tenant)
+        if db.is_admin_token(token):
+            return None
+
+        tenant_id = db.validate_token(token)
+        if tenant_id is None:
+            flow.response = http.Response.make(
+                407,
+                b"Invalid proxy token. Check your API token.",
+                {"Content-Type": "text/plain", "Proxy-Authenticate": "Basic realm=\"LLMProxy\""},
+            )
+            return "_reject"
+
+        return tenant_id
+
     # -- Request phase: check block list & record start time -----------------
 
     def request(self, flow: http.HTTPFlow) -> None:
         host = flow.request.pretty_host
         self._flow_start[flow.id] = time.time()
 
-        blocked, reason = db.is_domain_blocked(host)
+        # Authenticate and resolve tenant
+        tenant_id = self._extract_tenant(flow)
+        if tenant_id == "_reject":
+            self._flow_start.pop(flow.id, None)
+            return  # 407 already sent
+        self._flow_tenant[flow.id] = tenant_id
+
+        blocked, reason = db.is_domain_blocked(host, tenant_id=tenant_id)
         if blocked:
             flow.response = http.Response.make(
                 403,
@@ -113,9 +179,12 @@ class TrafficCapture:
             ctx.log.warn(f"[LLMProxy] Blocked {host}: {reason}")
             return
 
-        # Apply request-phase traffic rules
+        # Apply request-phase traffic rules (only rules matching this tenant)
         self._load_rules()
         for rule in self._rules:
+            rule_tenant = rule.get("tenant_id")
+            if rule_tenant and rule_tenant != tenant_id:
+                continue  # skip rules from other tenants
             if not self._rule_matches(rule, host, flow.request.path, flow.request.pretty_url):
                 continue
             action = rule.get("action") or {}
@@ -138,6 +207,7 @@ class TrafficCapture:
 
     def response(self, flow: http.HTTPFlow) -> None:
         start = self._flow_start.pop(flow.id, None)
+        tenant_id = self._flow_tenant.pop(flow.id, None)
         duration_ms = (time.time() - start) * 1000 if start else None
 
         req = flow.request
@@ -146,6 +216,9 @@ class TrafficCapture:
         # Apply response-phase traffic rules before storing
         self._load_rules()
         for rule in self._rules:
+            rule_tenant = rule.get("tenant_id")
+            if rule_tenant and rule_tenant != tenant_id:
+                continue
             if not self._rule_matches(rule, req.pretty_host, req.path, req.pretty_url):
                 continue
             action = rule.get("action") or {}
@@ -183,6 +256,7 @@ class TrafficCapture:
                 content_type=content_type,
                 content_length=len(resp_body_raw) if resp_body_raw else None,
                 duration_ms=duration_ms,
+                tenant_id=tenant_id,
             )
             ctx.log.debug(
                 f"[LLMProxy] #{row_id} {req.method} {req.pretty_url} → {resp.status_code if resp else '?'}"
@@ -194,6 +268,7 @@ class TrafficCapture:
 
     def error(self, flow: http.HTTPFlow) -> None:
         self._flow_start.pop(flow.id, None)
+        tenant_id = self._flow_tenant.pop(flow.id, None)
         req = flow.request
         try:
             db.insert_request(
@@ -214,6 +289,7 @@ class TrafficCapture:
                 content_type=None,
                 content_length=None,
                 duration_ms=None,
+                tenant_id=tenant_id,
             )
         except Exception:
             ctx.log.error("[LLMProxy] Failed to store errored request", exc_info=True)
@@ -222,6 +298,7 @@ class TrafficCapture:
 
     def websocket_message(self, flow: http.HTTPFlow) -> None:
         assert flow.websocket is not None
+        tenant_id = self._flow_tenant.get(flow.id)
         msg = flow.websocket.messages[-1]
 
         raw = msg.content
@@ -245,6 +322,7 @@ class TrafficCapture:
                 message_type=msg_type,
                 content=content if CAPTURE_BODY else None,
                 content_length=len(raw) if raw else 0,
+                tenant_id=tenant_id,
             )
         except Exception:
             ctx.log.error("[LLMProxy] Failed to store WebSocket message", exc_info=True)
