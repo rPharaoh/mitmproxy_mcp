@@ -1,0 +1,36 @@
+services:
+  # ── mitmproxy with traffic capture addon ──────────────────────────────
+  proxy:
+    build:
+      context: .
+      target: proxy
+    ports:
+      - "8080:8080"                       # proxy listener
+    volumes:
+      - llmproxy-data:/data
+    environment:
+      LLMPROXY_DB: /data/traffic.duckdb
+      LLMPROXY_MAX_BODY: "524288"         # 512 KB
+      LLMPROXY_CAPTURE_BODY: "1"
+      LLMPROXY_FLUSH_SIZE: "100"
+      LLMPROXY_FLUSH_INTERVAL: "1.0"
+    restart: unless-stopped
+
+  # ── MCP server (SSE transport for Docker) ─────────────────────────────
+  mcp:
+    build:
+      context: .
+      target: mcp
+    command: ["python", "mcp_server.py", "--transport", "sse"]
+    ports:
+      - "8000:8000"                       # MCP SSE endpoint
+    volumes:
+      - llmproxy-data:/data
+    environment:
+      LLMPROXY_DB: /data/traffic.duckdb
+    depends_on:
+      - proxy
+    restart: unless-stopped
+
+volumes:
+  llmproxy-data:

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+old/
+.git/
+.gitignore
+*.duckdb
+*.duckdb.wal
+*.db
+traffic.*
+README.md
+.vscode/
+.env
