@@ -31,6 +31,8 @@ services:
       LLMPROXY_FLUSH_INTERVAL: "1.0"
       LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-}"
       LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-1}"
+    volumes:
+      - mitmproxy-certs:/root/.mitmproxy    # persist CA cert across rebuilds
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -55,3 +57,4 @@ services:
 
 volumes:
   es-data:
+  mitmproxy-certs:
