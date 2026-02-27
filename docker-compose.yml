@@ -21,7 +21,7 @@ services:
       context: .
       target: proxy
     ports:
-      - "8080:8080"                       # proxy listener
+      - "127.0.0.1:8080:8080"              # proxy listener (localhost only)
     environment:
       LLMPROXY_ES_URL: "http://elasticsearch:9200"
       LLMPROXY_MAX_BODY: "524288"         # 512 KB
@@ -40,7 +40,7 @@ services:
       target: mcp
     command: ["python", "mcp_server.py", "--transport", "sse"]
     ports:
-      - "8000:8000"                       # MCP SSE endpoint
+      - "127.0.0.1:8000:8000"              # MCP SSE endpoint (localhost only)
     environment:
       LLMPROXY_ES_URL: "http://elasticsearch:9200"
     depends_on:
