@@ -152,8 +152,17 @@ if __name__ == "__main__":
 
         uvicorn.run(authed_app, host="0.0.0.0", port=port)
     elif use_streamable:
-        # Streamable HTTP without auth
-        mcp.run(transport="streamable-http")
+        # Streamable HTTP without auth — bind 0.0.0.0 for Docker
+        import uvicorn
+
+        app = mcp.streamable_http_app()
+        port = 8000
+        if "--port" in sys.argv:
+            idx = sys.argv.index("--port")
+            if idx + 1 < len(sys.argv):
+                port = int(sys.argv[idx + 1])
+
+        uvicorn.run(app, host="0.0.0.0", port=port)
     elif use_sse:
         # SSE without auth — let FastMCP handle it
         mcp.run(transport="sse")

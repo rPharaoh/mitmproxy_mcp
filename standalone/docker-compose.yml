@@ -1,0 +1,23 @@
+# All-in-one: single container with ES + proxy + MCP
+# Usage: docker compose up -d
+
+services:
+  mitmproxy-mcp:
+    build:
+      context: ..
+      dockerfile: standalone/Dockerfile
+    ports:
+      - "8080:8080"    # mitmproxy
+      - "8001:8000"    # MCP server
+    environment:
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-0}"
+      LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-}"
+    volumes:
+      - es-data:/var/lib/elasticsearch
+      - mitmproxy-certs:/root/.mitmproxy
+    restart: unless-stopped
+
+volumes:
+  es-data:
+  mitmproxy-certs:

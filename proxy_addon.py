@@ -251,7 +251,11 @@ class TrafficCapture:
 
     def response(self, flow: http.HTTPFlow) -> None:
         start = self._flow_start.pop(flow.id, None)
-        tenant_id = self._flow_tenant.pop(flow.id, None)
+        # Keep tenant_id in dict for WebSocket flows (websocket_message needs it)
+        if flow.websocket:
+            tenant_id = self._flow_tenant.get(flow.id)
+        else:
+            tenant_id = self._flow_tenant.pop(flow.id, None)
         duration_ms = (time.time() - start) * 1000 if start else None
 
         req = flow.request
@@ -339,6 +343,10 @@ class TrafficCapture:
             ctx.log.error("[LLMProxy] Failed to store errored request", exc_info=True)
 
     # -- WebSocket phase: capture individual messages ------------------------
+
+    def websocket_end(self, flow: http.HTTPFlow) -> None:
+        """Clean up tenant mapping when a WebSocket connection closes."""
+        self._flow_tenant.pop(flow.id, None)
 
     def websocket_message(self, flow: http.HTTPFlow) -> None:
         assert flow.websocket is not None

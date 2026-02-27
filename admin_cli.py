@@ -80,10 +80,25 @@ def cmd_revoke(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_clear(args: argparse.Namespace) -> None:
+    """Clear all captured data for a tenant."""
+    tenant = args.tenant
+    if not args.yes:
+        answer = input(f"Delete ALL data for tenant {tenant}? [y/N] ")
+        if answer.lower() not in ("y", "yes"):
+            print("Aborted.")
+            return
+    result = db.clear_tenant_data(tenant)
+    deleted = sum(result.values())
+    print(f"Cleared {deleted} documents across {len(result)} indices.")
+    for idx, count in result.items():
+        print(f"  {idx}: {count}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="admin_cli",
-        description="LLMProxy Admin CLI — manage API tokens",
+        description="LLMProxy Admin CLI — manage API tokens and data",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -100,6 +115,12 @@ def main() -> None:
     p_revoke = sub.add_parser("revoke", help="Revoke a token")
     p_revoke.add_argument("token", help="Full token string to revoke")
     p_revoke.set_defaults(func=cmd_revoke)
+
+    # clear
+    p_clear = sub.add_parser("clear", help="Clear all captured data for a tenant")
+    p_clear.add_argument("tenant", help="Tenant ID to clear data for")
+    p_clear.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    p_clear.set_defaults(func=cmd_clear)
 
     args = parser.parse_args()
     args.func(args)
