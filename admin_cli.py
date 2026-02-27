@@ -82,14 +82,21 @@ def cmd_revoke(args: argparse.Namespace) -> None:
 
 def cmd_clear(args: argparse.Namespace) -> None:
     """Clear all captured data for a tenant."""
-    tenant = args.tenant
+    if args.no_tenant:
+        tenant = None
+    elif args.tenant:
+        tenant = args.tenant
+    else:
+        print("Error: provide a tenant ID or use --no-tenant to clear orphaned data.", file=sys.stderr)
+        sys.exit(1)
+    label = tenant or "<no tenant (unassigned)>"
     if not args.yes:
-        answer = input(f"Delete ALL data for tenant {tenant}? [y/N] ")
+        answer = input(f"Delete ALL data for {label}? [y/N] ")
         if answer.lower() not in ("y", "yes"):
             print("Aborted.")
             return
     result = db.clear_tenant_data(tenant)
-    deleted = sum(result.values())
+    deleted = sum(v for v in result.values() if isinstance(v, int))
     print(f"Cleared {deleted} documents across {len(result)} indices.")
     for idx, count in result.items():
         print(f"  {idx}: {count}")
@@ -118,7 +125,8 @@ def main() -> None:
 
     # clear
     p_clear = sub.add_parser("clear", help="Clear all captured data for a tenant")
-    p_clear.add_argument("tenant", help="Tenant ID to clear data for")
+    p_clear.add_argument("tenant", nargs="?", default=None, help="Tenant ID to clear data for")
+    p_clear.add_argument("--no-tenant", action="store_true", help="Clear data with no tenant assigned (orphaned data)")
     p_clear.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     p_clear.set_defaults(func=cmd_clear)
 

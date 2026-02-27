@@ -399,15 +399,19 @@ def list_tokens() -> list[dict]:
     return results
 
 
-def clear_tenant_data(tenant_id: str) -> dict:
+def clear_tenant_data(tenant_id: str | None) -> dict:
     """Delete all data for a tenant across all indices (except tokens).
 
     Removes requests, websocket messages, blocked domains, tags, and rules.
     Token records are preserved (revoke them separately if needed).
+    Pass tenant_id=None to clear data that has no tenant assigned.
     Returns per-index deletion counts.
     """
     es = _get_es()
-    query = {"term": {"tenant_id": tenant_id}}
+    if tenant_id is None:
+        query = {"bool": {"must_not": {"exists": {"field": "tenant_id"}}}}
+    else:
+        query = {"term": {"tenant_id": tenant_id}}
     results = {}
     for idx in (IDX_REQUESTS, IDX_WS, IDX_BLOCKED, IDX_TAGS, IDX_RULES):
         try:
