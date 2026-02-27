@@ -25,6 +25,8 @@ _MODULES = [
     "tools.control",
     "tools.admin",
     "tools.fuzzing",
+    "tools.scanning",
+    "tools.recon",
 ]
 
 

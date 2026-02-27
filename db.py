@@ -620,8 +620,6 @@ def get_recent_requests(
     body = {
         "query": query,
         "sort": [{"timestamp": "desc"}],
-        "_source": ["timestamp", "method", "url", "host", "status_code",
-                     "content_type", "content_length", "duration_ms"],
     }
     return _search(IDX_REQUESTS, body, size=min(limit, 200))
 
@@ -718,8 +716,6 @@ def find_errors(limit: int = 50, tenant_id: str | None = None) -> list[dict]:
     body = {
         "query": {"bool": {"must": must}},
         "sort": [{"timestamp": "desc"}],
-        "_source": ["timestamp", "method", "url", "host", "status_code",
-                     "content_type", "duration_ms"],
     }
     return _search(IDX_REQUESTS, body, size=limit)
 
@@ -748,8 +744,6 @@ def search_requests(
     body = {
         "query": {"bool": {"must": must}},
         "sort": [{"timestamp": "desc"}],
-        "_source": ["timestamp", "method", "url", "host", "status_code",
-                     "content_type", "content_length", "duration_ms"],
     }
     return _search(IDX_REQUESTS, body, size=limit)
 
@@ -982,7 +976,6 @@ def get_api_map(host: str | None = None, limit: int = 100, tenant_id: str | None
     body = {
         "query": query,
         "sort": [{"timestamp": "desc"}],
-        "_source": ["host", "path", "method", "status_code", "duration_ms", "timestamp"],
     }
     rows = _search(IDX_REQUESTS, body, size=min(limit * 5, 5000))
 
@@ -1045,8 +1038,6 @@ def get_endpoint_detail(host: str, path: str, limit: int = 50, tenant_id: str | 
     body = {
         "query": {"bool": {"must": must}},
         "sort": [{"timestamp": "desc"}],
-        "_source": ["timestamp", "method", "url", "host", "path",
-                     "status_code", "content_type", "content_length", "duration_ms"],
     }
     return _search(IDX_REQUESTS, body, size=limit)
 
@@ -1058,7 +1049,6 @@ def get_endpoint_detail(host: str, path: str, limit: int = 50, tenant_id: str | 
 def get_live_feed(
     after_id: str | int | None = None,
     after_ws_id: str | int | None = None,
-    include_bodies: bool = False,
     limit: int = 100,
     tenant_id: str | None = None,
 ) -> dict:
@@ -1070,11 +1060,6 @@ def get_live_feed(
     _flush_ws_buffer()
     cap = min(limit, 500)
 
-    source_fields = None if include_bodies else [
-        "timestamp", "method", "url", "host", "status_code",
-        "content_type", "content_length", "duration_ms",
-    ]
-
     t_must = _tenant_must(tenant_id)
 
     if after_id is not None:
@@ -1083,13 +1068,9 @@ def get_live_feed(
             "query": {"bool": {"must": must}},
             "sort": [{"timestamp": "asc"}],
         }
-        if source_fields:
-            body["_source"] = source_fields
         http_rows = _search(IDX_REQUESTS, body, size=cap)
     else:
         body = {"query": _tenant_query(tenant_id), "sort": [{"timestamp": "desc"}]}
-        if source_fields:
-            body["_source"] = source_fields
         http_rows = _search(IDX_REQUESTS, body, size=cap)
         http_rows.reverse()
 
@@ -1238,7 +1219,6 @@ def detect_pii(limit: int = 500, tenant_id: str | None = None) -> dict:
     body = {
         "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
-        "_source": ["url", "host", "method", "request_body", "response_body"],
     }
     rows = _search(IDX_REQUESTS, body, size=min(limit, 2000))
     findings: list[dict] = []
@@ -1274,7 +1254,6 @@ def extract_session_tokens(limit: int = 300, tenant_id: str | None = None) -> di
     body = {
         "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
-        "_source": ["url", "host", "request_headers", "response_headers"],
     }
     rows = _search(IDX_REQUESTS, body, size=min(limit, 1000))
     tokens: list[dict] = []
@@ -1329,7 +1308,6 @@ def detect_session_issues(limit: int = 500, tenant_id: str | None = None) -> dic
     body = {
         "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
-        "_source": ["url", "host", "method", "request_headers", "response_headers"],
     }
     rows = _search(IDX_REQUESTS, body, size=min(limit, 1000))
     issues: list[dict] = []
@@ -1397,7 +1375,6 @@ def detect_c2_patterns(limit: int = 1000, tenant_id: str | None = None) -> dict:
     body = {
         "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "asc"}],
-        "_source": ["host", "timestamp", "url", "method", "content_type", "content_length"],
     }
     rows = _search(IDX_REQUESTS, body, size=min(limit, 5000))
     findings: list[dict] = []
@@ -1536,7 +1513,6 @@ def analyze_cookies_in_traffic(limit: int = 300, tenant_id: str | None = None) -
     body = {
         "query": _tenant_query(tenant_id),
         "sort": [{"timestamp": "desc"}],
-        "_source": ["host", "request_headers", "response_headers"],
     }
     rows = _search(IDX_REQUESTS, body, size=min(limit, 1000))
     cookies_map: dict[str, dict] = {}
@@ -1653,8 +1629,6 @@ def generate_openapi_spec(host: str | None = None, tenant_id: str | None = None)
     body = {
         "query": query,
         "sort": [{"timestamp": "desc"}],
-        "_source": ["host", "path", "method", "status_code", "content_type",
-                     "request_headers", "request_body", "response_headers", "response_body"],
     }
     rows = _search(IDX_REQUESTS, body, size=2000)
 
@@ -1752,7 +1726,6 @@ def analyze_performance(limit: int = 100, tenant_id: str | None = None) -> dict:
     large = _search(IDX_REQUESTS, {
         "query": {"bool": {"must": large_must}},
         "sort": [{"content_length": "desc"}],
-        "_source": ["url", "host", "method", "content_type", "content_length", "duration_ms"],
     }, size=20)
 
     # Redundant requests
@@ -1877,7 +1850,6 @@ def detect_anomalies(limit: int = 1000, tenant_id: str | None = None) -> dict:
         outliers = _search(IDX_REQUESTS, {
             "query": {"bool": {"must": outlier_must}},
             "sort": [{"duration_ms": "desc"}],
-            "_source": ["url", "host", "method", "duration_ms", "status_code"],
         }, size=20)
 
     # Rare hosts
@@ -2050,7 +2022,6 @@ def bandwidth_analysis(limit: int = 50, tenant_id: str | None = None) -> dict:
     largest = _search(IDX_REQUESTS, {
         "query": {"bool": {"must": largest_must}},
         "sort": [{"content_length": "desc"}],
-        "_source": ["url", "host", "content_type", "content_length"],
     }, size=20)
 
     total_body = {"size": 0, "query": tq, "aggs": {"total": {"sum": {"field": "content_length"}}}}

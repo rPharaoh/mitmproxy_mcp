@@ -1,6 +1,37 @@
 FROM python:3.11-slim AS base
 
-RUN pip install --no-cache-dir pipenv
+# Install external scanning tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nmap \
+        libnet-ssleay-perl \
+        perl \
+        git \
+        wget \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install nikto from source
+RUN git clone --depth 1 https://github.com/sullo/nikto.git /opt/nikto \
+    && ln -s /opt/nikto/program/nikto.pl /usr/local/bin/nikto \
+    && chmod +x /opt/nikto/program/nikto.pl
+
+# Install ProjectDiscovery Go binaries (subfinder, httpx, dnsx)
+RUN wget -q https://github.com/projectdiscovery/subfinder/releases/download/v2.6.7/subfinder_2.6.7_linux_amd64.zip \
+    && unzip -oq subfinder_2.6.7_linux_amd64.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/subfinder \
+    && rm subfinder_2.6.7_linux_amd64.zip
+
+RUN wget -q https://github.com/projectdiscovery/httpx/releases/download/v1.6.9/httpx_1.6.9_linux_amd64.zip \
+    && unzip -oq httpx_1.6.9_linux_amd64.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/httpx \
+    && rm httpx_1.6.9_linux_amd64.zip
+
+RUN wget -q https://github.com/projectdiscovery/dnsx/releases/download/v1.2.1/dnsx_1.2.1_linux_amd64.zip \
+    && unzip -oq dnsx_1.2.1_linux_amd64.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/dnsx \
+    && rm dnsx_1.2.1_linux_amd64.zip
+
+RUN pip install --no-cache-dir pipenv sslyze
 
 WORKDIR /app
 

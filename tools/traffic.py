@@ -76,7 +76,6 @@ def register(mcp, helpers):
     def get_live_feed(
         after_id: int | None = None,
         after_ws_id: int | None = None,
-        include_bodies: bool = False,
         limit: int = 100,
     ) -> str:
         """Poll-based live stream of HTTP requests and WebSocket messages.
@@ -86,13 +85,11 @@ def register(mcp, helpers):
         includes updated cursor values — pass them back on the next call to
         receive only new items.
 
-        Set include_bodies=True to include full request/response bodies
-        (larger payloads).
+        Always includes full request/response headers and bodies.
         """
         feed = db.get_live_feed(
             after_id=after_id,
             after_ws_id=after_ws_id,
-            include_bodies=include_bodies,
             limit=limit,
             tenant_id=_tid(),
         )
