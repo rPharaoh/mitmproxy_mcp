@@ -677,13 +677,17 @@ if __name__ == "__main__":
     import sys
 
     use_sse = "--transport" in sys.argv and "sse" in sys.argv
+    use_streamable = "--transport" in sys.argv and "streamable-http" in sys.argv
 
-    if use_sse and db.AUTH_REQUIRED:
-        # SSE with auth middleware — run via uvicorn
+    if (use_sse or use_streamable) and db.AUTH_REQUIRED:
+        # SSE or Streamable HTTP with auth middleware — run via uvicorn
         import uvicorn
 
-        sse_app = mcp.sse_app()
-        authed_app = _AuthMiddleware(sse_app)
+        if use_streamable:
+            app = mcp.streamable_http_app()
+        else:
+            app = mcp.sse_app()
+        authed_app = _AuthMiddleware(app)
 
         port = 8000
         if "--port" in sys.argv:
@@ -692,6 +696,9 @@ if __name__ == "__main__":
                 port = int(sys.argv[idx + 1])
 
         uvicorn.run(authed_app, host="0.0.0.0", port=port)
+    elif use_streamable:
+        # Streamable HTTP without auth
+        mcp.run(transport="streamable-http")
     elif use_sse:
         # SSE without auth — let FastMCP handle it
         mcp.run(transport="sse")

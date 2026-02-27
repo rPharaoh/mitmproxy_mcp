@@ -36,9 +36,11 @@ docker compose up -d
 
 This starts:
 - **Proxy** on `http://localhost:8080` — point your browser/app here
-- **MCP server** (SSE) on `http://localhost:8000` — connect your LLM client here
+- **MCP server** (Streamable HTTP) on `http://localhost:8001` — connect your LLM client here
 
 Both connect to a shared Elasticsearch instance (started automatically).
+
+The mitmproxy CA certificate is persisted in a Docker volume (`mitmproxy-certs`), so you only need to install it once via `http://mitm.it` — it survives rebuilds and restarts.
 
 To stop:
 
@@ -63,14 +65,13 @@ LLMPROXY_AUTH_REQUIRED=1
 docker compose up -d
 ```
 
-3. Create user tokens via the MCP admin tools (authenticate as admin first):
+3. Create user tokens via the Admin CLI:
 
-```
-POST http://localhost:8000/sse
-Authorization: Bearer your-secret-admin-token-here
+```bash
+docker compose exec mcp python admin_cli.py create "User Name"
 ```
 
-Then use the `create_token` tool to generate tokens for each user.
+The CLI prints the raw token and a ready-to-paste MCP client config.
 
 #### How Auth Works
 
@@ -82,14 +83,16 @@ Proxy-Authorization: Basic <base64(token:)>
 
 The proxy strips this header before forwarding upstream. If auth is required and the token is invalid, the proxy returns **407 Proxy Authentication Required**.
 
-**MCP Server (SSE):** Users authenticate via Bearer token in the `Authorization` header or a `?token=` query parameter.
+**Proxy (HTTPS / CONNECT):** For HTTPS traffic, the proxy validates the token during the CONNECT tunnel handshake. Chrome and other browsers send `Proxy-Authorization` only on CONNECT — the proxy stashes the tenant for all subsequent requests in that tunnel. Configure your browser proxy as `127.0.0.1:8080` (no credentials in URL) and enter the token as username when prompted.
+
+**MCP Server (Streamable HTTP):** Users authenticate via Bearer token in the `Authorization` header or a `?token=` query parameter.
 
 ```
 Authorization: Bearer <user-token>
 ```
 or
 ```
-http://localhost:8000/sse?token=<user-token>
+http://localhost:8001/mcp/?token=<user-token>
 ```
 
 If the token is invalid or missing, the server returns **401 Unauthorized**.
@@ -172,7 +175,13 @@ Configure your browser/app to use `http://localhost:8080` as its HTTP proxy. Ins
 pipenv run python mcp_server.py
 ```
 
-**SSE transport** (for web-based MCP clients):
+**Streamable HTTP transport** (for VS Code, web-based MCP clients):
+
+```bash
+pipenv run python mcp_server.py --transport streamable-http --port 8000
+```
+
+**SSE transport** (for legacy MCP clients):
 
 ```bash
 pipenv run python mcp_server.py --transport sse --port 8000
@@ -180,15 +189,27 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 ### 4. Configure your MCP client
 
-#### Claude Desktop (`claude_desktop_config.json`)
+#### VS Code / Cursor (`.vscode/mcp.json`)
 
-**Docker (SSE):**
+**Docker (Streamable HTTP):**
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "llmproxy": {
-      "url": "http://localhost:8000/sse"
+      "url": "http://localhost:8001/mcp/"
+    }
+  }
+}
+```
+
+**Docker with auth:**
+
+```json
+{
+  "servers": {
+    "llmproxy": {
+      "url": "http://localhost:8001/mcp/?token=YOUR_TOKEN_HERE"
     }
   }
 }
@@ -198,7 +219,7 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "llmproxy": {
       "command": "python",
       "args": ["path/to/mcp_server.py"],
@@ -210,15 +231,15 @@ pipenv run python mcp_server.py --transport sse --port 8000
 }
 ```
 
-#### VS Code / Cursor (`.vscode/mcp.json`)
+#### Claude Desktop (`claude_desktop_config.json`)
 
-**Docker (SSE):**
+**Docker:**
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "llmproxy": {
-      "url": "http://localhost:8000/sse"
+      "url": "http://localhost:8001/mcp/"
     }
   }
 }
@@ -228,7 +249,7 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "llmproxy": {
       "command": "python",
       "args": ["path/to/mcp_server.py"],
