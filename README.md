@@ -1,4 +1,4 @@
-# LLMProxy
+# mitmproxy_mcp
 
 An MCP server that exposes **mitmproxy-captured web traffic** as tools an LLM can use — inspect requests, analyze patterns, block domains, and more.
 

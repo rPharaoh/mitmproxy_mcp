@@ -533,9 +533,20 @@ def insert_request_immediate(
 
 
 def is_domain_blocked(domain: str, tenant_id: str | None = None) -> tuple[bool, str | None]:
-    """Check whether a domain is on the block list."""
+    """Check whether a domain is on the block list.
+
+    Supports subdomain matching: blocking ``reddit.com`` also blocks
+    ``www.reddit.com``, ``old.reddit.com``, etc.
+    """
     es = _get_es()
-    must = [{"term": {"domain": domain}}] + _tenant_must(tenant_id)
+    # Build list of candidate domains: the host itself plus each parent domain.
+    # e.g. "www.reddit.com" -> ["www.reddit.com", "reddit.com"]
+    candidates = [domain]
+    parts = domain.split(".")
+    for i in range(1, len(parts) - 1):
+        candidates.append(".".join(parts[i:]))
+
+    must = [{"terms": {"domain": candidates}}] + _tenant_must(tenant_id)
     resp = es.search(
         index=IDX_BLOCKED,
         body={"query": {"bool": {"must": must}}},
