@@ -242,6 +242,19 @@ class TrafficCapture:
                     {"Content-Type": "text/plain"},
                 )
                 return
+            elif rtype == "mock_response":
+                status = action.get("status", 200)
+                body = action.get("body", "")
+                headers = {"Content-Type": action.get("content_type", "application/json")}
+                for k, v in action.get("headers", {}).items():
+                    headers[k] = v
+                flow.response = http.Response.make(
+                    status,
+                    body.encode("utf-8") if isinstance(body, str) else body,
+                    headers,
+                )
+                ctx.log.info(f"[LLMProxy] Mocked {flow.request.method} {flow.request.pretty_url} → {status}")
+                return
             elif rtype == "throttle":
                 delay = action.get("delay_ms", 0) / 1000.0
                 if delay > 0:

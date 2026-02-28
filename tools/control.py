@@ -60,6 +60,7 @@ def register(mcp, helpers):
           throttle               — action: {"delay_ms": 2000}
           block_pattern          — action: {"status": 403, "body": "Blocked"}
           modify_response_body   — action: {"find": "old", "replace": "new"}
+          mock_response          — action: {"status": 200, "body": "{\"ok\":true}", "content_type": "application/json", "headers": {}}  Returns a custom response without forwarding to the real server.
 
         match_host/match_path/match_url: glob patterns (* = wildcard) to filter which requests the rule applies to.
         """
