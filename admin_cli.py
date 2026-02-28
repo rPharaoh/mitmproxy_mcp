@@ -20,7 +20,7 @@ import argparse
 import json
 import sys
 
-import db
+import storage.db as db
 
 
 def cmd_create(args: argparse.Namespace) -> None:

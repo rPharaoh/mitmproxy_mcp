@@ -667,15 +667,60 @@ def _parse_json_cols(d: dict) -> dict:
     return d
 
 
+# ---------------------------------------------------------------------------
+# Filter helpers
+# ---------------------------------------------------------------------------
+
+def _status_class_range(status_class: str) -> tuple:
+    """Convert a status class string like '2xx' to (200, 300) range."""
+    mapping = {"1xx": (100, 200), "2xx": (200, 300), "3xx": (300, 400), "4xx": (400, 500), "5xx": (500, 600)}
+    return mapping.get(status_class.lower(), (None, None))
+
+
+_MIME_GROUPS = {
+    "html":   ["text/html"],
+    "json":   ["application/json", "text/json"],
+    "xml":    ["application/xml", "text/xml", "application/xhtml+xml", "application/atom+xml", "application/rss+xml"],
+    "script": ["application/javascript", "text/javascript", "application/x-javascript"],
+    "css":    ["text/css"],
+    "image":  ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/x-icon", "image/avif"],
+    "font":   ["font/woff", "font/woff2", "font/ttf", "font/otf", "application/font-woff", "application/font-woff2"],
+    "media":  ["audio/", "video/"],
+    "text":   ["text/plain"],
+}
+
+
+def _mime_filter(mime_type: str) -> dict:
+    """Build an ES query clause to filter by MIME type group."""
+    group = mime_type.lower()
+    if group in _MIME_GROUPS:
+        prefixes = _MIME_GROUPS[group]
+        should = []
+        for p in prefixes:
+            if p.endswith("/"):
+                should.append({"prefix": {"content_type": p}})
+            else:
+                should.append({"prefix": {"content_type": p}})
+        return {"bool": {"should": should, "minimum_should_match": 1}}
+    # Fallback: treat as prefix search
+    return {"prefix": {"content_type": group}}
+
+
 def get_recent_requests(
     limit: int = 25,
+    offset: int = 0,
     method: str | None = None,
     host: str | None = None,
     status_code: int | None = None,
+    status_class: str | None = None,
     search: str | None = None,
+    mime_type: str | None = None,
     tenant_id: str | None = None,
-) -> list[dict]:
-    """Return recent requests with optional filters."""
+) -> dict:
+    """Return recent requests with optional filters.
+
+    Returns {"requests": [...], "total": N, "offset": M, "limit": L}.
+    """
     _flush_buffer()
     must: list[dict] = _tenant_must(tenant_id)
     if method:
@@ -684,15 +729,28 @@ def get_recent_requests(
         must.append({"wildcard": {"host": f"*{host.lower()}*"}})
     if status_code is not None:
         must.append({"term": {"status_code": status_code}})
+    if status_class:
+        lo, hi = _status_class_range(status_class)
+        if lo is not None:
+            must.append({"range": {"status_code": {"gte": lo, "lt": hi}}})
     if search:
         must.append({"wildcard": {"url.raw": f"*{search}*"}})
+    if mime_type:
+        must.append(_mime_filter(mime_type))
 
     query = {"bool": {"must": must}} if must else {"match_all": {}}
     body = {
         "query": query,
         "sort": [{"timestamp": "desc"}],
     }
-    return _search(IDX_REQUESTS, body, size=min(limit, 200))
+    cap = min(limit, 200)
+    off = max(offset, 0)
+
+    es = _get_es()
+    resp = es.search(index=IDX_REQUESTS, body=body, size=cap, from_=off)
+    total = resp["hits"]["total"]["value"]
+    rows = [_hit_to_dict(h) for h in resp["hits"]["hits"]]
+    return {"requests": rows, "total": total, "offset": off, "limit": cap}
 
 
 def get_request_by_id(request_id: str | int, tenant_id: str | None = None) -> dict | None:
@@ -1124,6 +1182,9 @@ def get_live_feed(
     tenant_id: str | None = None,
     host: str | None = None,
     search: str | None = None,
+    method: str | None = None,
+    status_class: str | None = None,
+    mime_type: str | None = None,
 ) -> dict:
     """Return new HTTP requests and WebSocket messages since given cursors.
 
@@ -1138,6 +1199,14 @@ def get_live_feed(
         t_must = t_must + [{"term": {"host": host}}]
     if search:
         t_must = t_must + [{"wildcard": {"url.raw": f"*{search}*"}}]
+    if method:
+        t_must = t_must + [{"term": {"method": method.upper()}}]
+    if status_class:
+        lo, hi = _status_class_range(status_class)
+        if lo is not None:
+            t_must = t_must + [{"range": {"status_code": {"gte": lo, "lt": hi}}}]
+    if mime_type:
+        t_must = t_must + [_mime_filter(mime_type)]
 
     if after_id is not None:
         must = t_must + [{"range": {"timestamp": {"gt": str(after_id)}}}]

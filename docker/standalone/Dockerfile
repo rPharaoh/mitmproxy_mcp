@@ -77,13 +77,15 @@ COPY Pipfile Pipfile.lock ./
 RUN pipenv install --deploy --system && pip cache purge
 
 # ── 6. Application code ───────────────────────────────────────────────────
-COPY db.py proxy_addon.py mcp_server.py admin_cli.py dashboard_server.py ./
-COPY tools/ ./tools/
+COPY storage/ ./storage/
+COPY proxy/ ./proxy/
+COPY mcp/ ./mcp/
+COPY admin_cli.py ./
 COPY dashboard/ ./dashboard/
 
 # ── 7. Supervisor config ──────────────────────────────────────────────────
-COPY standalone/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY standalone/entrypoint.sh /entrypoint.sh
+COPY docker/standalone/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker/standalone/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # ── 8. Environment defaults ───────────────────────────────────────────────
@@ -93,7 +95,8 @@ ENV LLMPROXY_ES_URL=http://127.0.0.1:9200 \
     LLMPROXY_FLUSH_SIZE=100 \
     LLMPROXY_FLUSH_INTERVAL=1.0 \
     LLMPROXY_AUTH_REQUIRED=0 \
-    LLMPROXY_ADMIN_TOKEN=""
+    LLMPROXY_ADMIN_TOKEN="" \
+    PYTHONPATH=/app
 
 # Proxy: 8080  |  MCP: 8000  |  Dashboard: 8002
 EXPOSE 8080 8000 8002

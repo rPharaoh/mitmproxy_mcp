@@ -20,7 +20,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-import db
+import storage.db as db
 from tools import register_all
 
 # ---------------------------------------------------------------------------

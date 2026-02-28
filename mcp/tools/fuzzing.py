@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-import db
+import storage.db as db
 
 # ---------------------------------------------------------------------------
 # Built-in payload sets

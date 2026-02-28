@@ -43,7 +43,7 @@ services:
     build:
       context: .
       target: mcp
-    command: ["python", "mcp_server.py", "--transport", "streamable-http"]
+    command: ["python", "mcp/mcp_server.py", "--transport", "streamable-http"]
     ports:
       - "8001:8000"                       # MCP SSE endpoint
     environment:

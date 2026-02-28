@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import db
+import storage.db as db
 
 
 def register(mcp, helpers):
@@ -28,7 +28,8 @@ def register(mcp, helpers):
             status_code=status_code, search=search,
             tenant_id=_tid(),
         )
-        return _json({"count": len(rows), "requests": rows})
+        reqs = rows.get("requests", rows) if isinstance(rows, dict) else rows
+        return _json({"count": len(reqs), "requests": reqs})
 
     @mcp.tool()
     def get_request_detail(request_id: int) -> str:

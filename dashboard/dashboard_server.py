@@ -31,13 +31,13 @@ from starlette.responses import JSONResponse, HTMLResponse, FileResponse, Stream
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
-import db
+import storage.db as db
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-STATIC_DIR = Path(__file__).parent / "dashboard" / "static"
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 def _json_response(data: Any, status: int = 200) -> JSONResponse:
@@ -109,14 +109,17 @@ async def api_summary(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 async def api_requests(request: Request) -> JSONResponse:
-    """GET /api/requests – recent requests with optional filters."""
+    """GET /api/requests – recent requests with optional filters and pagination."""
     try:
         data = db.get_recent_requests(
             limit=_int(request.query_params.get("limit"), 50),
+            offset=_int(request.query_params.get("offset"), 0),
             method=request.query_params.get("method"),
             host=request.query_params.get("host"),
             status_code=_int(request.query_params.get("status_code"), None) if request.query_params.get("status_code") else None,
+            status_class=request.query_params.get("status_class") or None,
             search=request.query_params.get("search"),
+            mime_type=request.query_params.get("mime_type") or None,
             tenant_id=_tenant(request),
         )
         return _json_response(data)
@@ -187,7 +190,7 @@ async def api_domains(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 async def api_live(request: Request) -> JSONResponse:
-    """GET /api/live?after_id=...&after_ws_id=...&host=...&search=... – poll-based live feed."""
+    """GET /api/live – poll-based live feed with filters."""
     try:
         data = db.get_live_feed(
             after_id=request.query_params.get("after_id"),
@@ -196,6 +199,9 @@ async def api_live(request: Request) -> JSONResponse:
             tenant_id=_tenant(request),
             host=request.query_params.get("host") or None,
             search=request.query_params.get("search") or None,
+            method=request.query_params.get("method") or None,
+            status_class=request.query_params.get("status_class") or None,
+            mime_type=request.query_params.get("mime_type") or None,
         )
         return _json_response(data)
     except Exception as e:
@@ -203,10 +209,13 @@ async def api_live(request: Request) -> JSONResponse:
 
 
 async def api_live_stream(request: Request) -> StreamingResponse:
-    """GET /api/live/stream?host=...&search=... – Server-Sent Events for real-time feed."""
+    """GET /api/live/stream – Server-Sent Events for real-time feed with filters."""
     tenant_id = _tenant(request)
     host = request.query_params.get("host") or None
     search = request.query_params.get("search") or None
+    method = request.query_params.get("method") or None
+    status_class = request.query_params.get("status_class") or None
+    mime_type = request.query_params.get("mime_type") or None
 
     async def event_generator():
         cursor_http = None
@@ -224,6 +233,9 @@ async def api_live_stream(request: Request) -> StreamingResponse:
                         tenant_id=tenant_id,
                         host=host,
                         search=search,
+                        method=method,
+                        status_class=status_class,
+                        mime_type=mime_type,
                     )
                     if data.get("http", {}).get("cursor"):
                         cursor_http = data["http"]["cursor"]

@@ -79,7 +79,7 @@ function showApp() {
     document.getElementById('app-container').style.display = 'flex';
     updateAuthUI();
     loadTenants();
-    loadOverview();
+    navigateTo('overview');
 }
 
 function updateAuthUI() {
@@ -310,6 +310,9 @@ function navigateTo(page) {
     // Stop live feed when leaving that page
     if (page !== 'live') stopLive();
 
+    // Reset auto-refresh timer for new page
+    _restartAutoRefresh();
+
     // Load data for the page
     const loaders = {
         'overview': loadOverview,
@@ -334,6 +337,63 @@ function navigateTo(page) {
 navItems.forEach(item => {
     item.addEventListener('click', () => navigateTo(item.dataset.page));
 });
+
+// ─── Auto-refresh ──────────────────────────────────────────────────────────
+
+let _autoRefreshTimer = null;
+let _autoRefreshEnabled = localStorage.getItem('llmproxy_autorefresh') === '1';
+let _autoRefreshInterval = parseInt(localStorage.getItem('llmproxy_autorefresh_interval') || '10', 10);
+
+// Pages that should NOT auto-refresh (live has its own SSE, settings pages are interactive)
+const _noAutoRefreshPages = new Set(['live', 'tokens', 'export', 'clear-data']);
+
+// The loaders map (reuse from navigateTo)
+const _pageLoaders = {
+    'overview': () => loadOverview(),
+    'requests': () => loadRequests(_reqPage),
+    'domains': () => loadDomains(),
+    'errors': () => loadErrors(),
+    'websocket': () => loadWebSocket(),
+    'performance': () => loadPerformance(),
+    'security': () => loadSecurity(),
+    'privacy': () => loadPrivacy(),
+    'api-map': () => loadApiMap(),
+    'blocked': () => loadBlocked(),
+    'rules': () => loadRules(),
+};
+
+function _restartAutoRefresh() {
+    if (_autoRefreshTimer) { clearInterval(_autoRefreshTimer); _autoRefreshTimer = null; }
+    if (!_autoRefreshEnabled) return;
+    if (_noAutoRefreshPages.has(_activePage)) return;
+    const loader = _pageLoaders[_activePage];
+    if (!loader) return;
+    _autoRefreshTimer = setInterval(loader, _autoRefreshInterval * 1000);
+}
+
+function _stopAutoRefresh() {
+    if (_autoRefreshTimer) { clearInterval(_autoRefreshTimer); _autoRefreshTimer = null; }
+}
+
+// Init control state from saved preferences
+(function initAutoRefresh() {
+    const chk = document.getElementById('auto-refresh-check');
+    const sel = document.getElementById('auto-refresh-interval');
+    if (chk) chk.checked = _autoRefreshEnabled;
+    if (sel) sel.value = String(_autoRefreshInterval);
+
+    chk?.addEventListener('change', () => {
+        _autoRefreshEnabled = chk.checked;
+        localStorage.setItem('llmproxy_autorefresh', _autoRefreshEnabled ? '1' : '0');
+        if (_autoRefreshEnabled) _restartAutoRefresh();
+        else _stopAutoRefresh();
+    });
+    sel?.addEventListener('change', () => {
+        _autoRefreshInterval = parseInt(sel.value, 10) || 10;
+        localStorage.setItem('llmproxy_autorefresh_interval', String(_autoRefreshInterval));
+        if (_autoRefreshEnabled) _restartAutoRefresh();
+    });
+})();
 
 // ─── Tab system ────────────────────────────────────────────────────────────
 
@@ -413,7 +473,8 @@ async function loadOverview() {
         }
 
         // Recent table
-        document.getElementById('overview-recent-table').innerHTML = requestsTable(requests);
+        const recentReqs = requests.requests || requests;
+        document.getElementById('overview-recent-table').innerHTML = requestsTable(recentReqs);
 
     } catch (e) {
         console.error('Overview load error:', e);
@@ -436,6 +497,9 @@ document.getElementById('summary-hours')?.addEventListener('change', loadOvervie
 let _liveEventSource = null;
 let _liveDomainFilter = '';
 let _liveSearch = '';
+let _liveMethod = '';
+let _liveStatusClass = '';
+let _liveMimeType = '';
 
 function startLive() {
     livePaused = false;
@@ -457,7 +521,7 @@ async function _loadLiveDomains() {
         const data = await api('/api/domains?limit=100');
         const sel = document.getElementById('live-domain-filter');
         const current = sel.value;
-        sel.innerHTML = '<option value="">All Domains</option>';
+        sel.innerHTML = '<option value="">All</option>';
         (data || []).forEach(d => {
             sel.innerHTML += `<option value="${esc(d.host)}">${esc(d.host)}</option>`;
         });
@@ -471,7 +535,7 @@ async function _loadReqDomains() {
         const sel = document.getElementById('req-domain');
         if (!sel) return;
         const current = sel.value;
-        sel.innerHTML = '<option value="">All Domains</option>';
+        sel.innerHTML = '<option value="">All</option>';
         (data || []).forEach(d => {
             sel.innerHTML += `<option value="${esc(d.host)}">${esc(d.host)}</option>`;
         });
@@ -479,12 +543,30 @@ async function _loadReqDomains() {
     } catch(e) {}
 }
 
-document.getElementById('live-domain-filter')?.addEventListener('change', () => {
-    _liveDomainFilter = document.getElementById('live-domain-filter').value;
-    // Restart the stream with the new filter
+function _restartLiveStream() {
     document.getElementById('live-feed-list').innerHTML = '';
     stopLive();
     _startSSE();
+}
+
+document.getElementById('live-domain-filter')?.addEventListener('change', () => {
+    _liveDomainFilter = document.getElementById('live-domain-filter').value;
+    _restartLiveStream();
+});
+
+document.getElementById('live-method-filter')?.addEventListener('change', () => {
+    _liveMethod = document.getElementById('live-method-filter').value;
+    _restartLiveStream();
+});
+
+document.getElementById('live-status-filter')?.addEventListener('change', () => {
+    _liveStatusClass = document.getElementById('live-status-filter').value;
+    _restartLiveStream();
+});
+
+document.getElementById('live-mime-filter')?.addEventListener('change', () => {
+    _liveMimeType = document.getElementById('live-mime-filter').value;
+    _restartLiveStream();
 });
 
 let _liveSearchDebounce = null;
@@ -492,11 +574,19 @@ document.getElementById('live-search')?.addEventListener('input', () => {
     clearTimeout(_liveSearchDebounce);
     _liveSearchDebounce = setTimeout(() => {
         _liveSearch = document.getElementById('live-search').value.trim();
-        document.getElementById('live-feed-list').innerHTML = '';
-        stopLive();
-        _startSSE();
+        _restartLiveStream();
     }, 400);
 });
+
+function clearLiveFilters() {
+    document.getElementById('live-search').value = '';
+    document.getElementById('live-domain-filter').value = '';
+    document.getElementById('live-method-filter').value = '';
+    document.getElementById('live-status-filter').value = '';
+    document.getElementById('live-mime-filter').value = '';
+    _liveSearch = ''; _liveDomainFilter = ''; _liveMethod = ''; _liveStatusClass = ''; _liveMimeType = '';
+    _restartLiveStream();
+}
 
 function _startSSE() {
     try {
@@ -505,6 +595,9 @@ function _startSSE() {
         if (_authToken) params.push('token=' + encodeURIComponent(_authToken));
         if (_liveDomainFilter) params.push('host=' + encodeURIComponent(_liveDomainFilter));
         if (_liveSearch) params.push('search=' + encodeURIComponent(_liveSearch));
+        if (_liveMethod) params.push('method=' + encodeURIComponent(_liveMethod));
+        if (_liveStatusClass) params.push('status_class=' + encodeURIComponent(_liveStatusClass));
+        if (_liveMimeType) params.push('mime_type=' + encodeURIComponent(_liveMimeType));
         if (params.length) url += '?' + params.join('&');
 
         _liveEventSource = new EventSource(url);
@@ -591,6 +684,9 @@ async function pollLive() {
         if (liveCursorWs) url += '&after_ws_id=' + encodeURIComponent(liveCursorWs);
         if (_liveDomainFilter) url += '&host=' + encodeURIComponent(_liveDomainFilter);
         if (_liveSearch) url += '&search=' + encodeURIComponent(_liveSearch);
+        if (_liveMethod) url += '&method=' + encodeURIComponent(_liveMethod);
+        if (_liveStatusClass) url += '&status_class=' + encodeURIComponent(_liveStatusClass);
+        if (_liveMimeType) url += '&mime_type=' + encodeURIComponent(_liveMimeType);
         const data = await api(url);
 
         if (data.http?.cursor) liveCursorHttp = data.http.cursor;
@@ -607,30 +703,73 @@ async function pollLive() {
 // PAGE: Requests
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function loadRequests() {
+let _reqPage = 0;
+
+async function loadRequests(page) {
     // Load domains for the filter dropdown
     _loadReqDomains();
+    if (typeof page === 'number') _reqPage = page;
+    else _reqPage = 0;
     try {
         const search = document.getElementById('req-search')?.value || '';
         const method = document.getElementById('req-method')?.value || '';
         const domain = document.getElementById('req-domain')?.value || '';
-        const limit = document.getElementById('req-limit')?.value || '50';
+        const statusClass = document.getElementById('req-status')?.value || '';
+        const mimeType = document.getElementById('req-mime')?.value || '';
+        const limit = parseInt(document.getElementById('req-limit')?.value || '50', 10);
+        const offset = _reqPage * limit;
 
-        let url = `/api/requests?limit=${limit}`;
+        let url = `/api/requests?limit=${limit}&offset=${offset}`;
         if (method) url += `&method=${method}`;
         if (domain) url += `&host=${encodeURIComponent(domain)}`;
         if (search) url += `&search=${encodeURIComponent(search)}`;
+        if (statusClass) url += `&status_class=${encodeURIComponent(statusClass)}`;
+        if (mimeType) url += `&mime_type=${encodeURIComponent(mimeType)}`;
 
         const data = await api(url);
-        document.getElementById('requests-table').innerHTML = requestsTable(data);
+        document.getElementById('requests-table').innerHTML = requestsTable(data.requests || data);
+        _renderReqPagination(data.total || 0, limit, _reqPage);
     } catch (e) {
         document.getElementById('requests-table').innerHTML = `<div class="empty-state"><p>Error loading requests</p></div>`;
+        document.getElementById('requests-pagination').style.display = 'none';
     }
+}
+
+function _renderReqPagination(total, limit, currentPage) {
+    const el = document.getElementById('requests-pagination');
+    if (!el || total <= limit) { if (el) el.style.display = 'none'; return; }
+    const totalPages = Math.ceil(total / limit);
+    const maxButtons = 7;
+    let startPage = Math.max(0, currentPage - Math.floor(maxButtons / 2));
+    let endPage = Math.min(totalPages, startPage + maxButtons);
+    if (endPage - startPage < maxButtons) startPage = Math.max(0, endPage - maxButtons);
+
+    let html = `<div class="pagination-info">${total.toLocaleString()} results · page ${currentPage + 1} of ${totalPages}</div><div class="pagination-buttons">`;
+    html += `<button class="btn btn-sm" ${currentPage === 0 ? 'disabled' : ''} onclick="loadRequests(0)" title="First"><i class="fa-solid fa-angles-left"></i></button>`;
+    html += `<button class="btn btn-sm" ${currentPage === 0 ? 'disabled' : ''} onclick="loadRequests(${currentPage - 1})" title="Previous"><i class="fa-solid fa-angle-left"></i></button>`;
+    for (let i = startPage; i < endPage; i++) {
+        html += `<button class="btn btn-sm${i === currentPage ? ' btn-primary' : ''}" onclick="loadRequests(${i})">${i + 1}</button>`;
+    }
+    html += `<button class="btn btn-sm" ${currentPage >= totalPages - 1 ? 'disabled' : ''} onclick="loadRequests(${currentPage + 1})" title="Next"><i class="fa-solid fa-angle-right"></i></button>`;
+    html += `<button class="btn btn-sm" ${currentPage >= totalPages - 1 ? 'disabled' : ''} onclick="loadRequests(${totalPages - 1})" title="Last"><i class="fa-solid fa-angles-right"></i></button>`;
+    html += '</div>';
+    el.innerHTML = html;
+    el.style.display = 'flex';
 }
 
 document.getElementById('req-search')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') loadRequests();
 });
+
+function clearReqFilters() {
+    document.getElementById('req-search').value = '';
+    document.getElementById('req-domain').value = '';
+    document.getElementById('req-method').value = '';
+    document.getElementById('req-status').value = '';
+    document.getElementById('req-mime').value = '';
+    document.getElementById('req-limit').value = '50';
+    loadRequests();
+}
 
 function requestsTable(rows) {
     if (!rows || rows.length === 0) {

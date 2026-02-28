@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import db
+import storage.db as db
 
 
 def register(mcp, helpers):

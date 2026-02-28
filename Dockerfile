@@ -41,11 +41,14 @@ COPY Pipfile Pipfile.lock ./
 RUN pipenv install --deploy --system && \
     pip cache purge
 
-COPY db.py proxy_addon.py mcp_server.py admin_cli.py dashboard_server.py ./
-COPY tools/ ./tools/
+COPY storage/ ./storage/
+COPY proxy/ ./proxy/
+COPY mcp/ ./mcp/
+COPY admin_cli.py ./
 COPY dashboard/ ./dashboard/
 
 ENV LLMPROXY_ES_URL=http://elasticsearch:9200
+ENV PYTHONPATH=/app
 
 # ---------------------------------------------------------------------------
 # Proxy target  –  mitmdump with the capture addon
@@ -53,7 +56,7 @@ ENV LLMPROXY_ES_URL=http://elasticsearch:9200
 FROM base AS proxy
 
 EXPOSE 8080
-ENTRYPOINT ["mitmdump", "-s", "proxy_addon.py", "--set", "listen_port=8080"]
+ENTRYPOINT ["mitmdump", "-s", "proxy/proxy_addon.py", "--set", "listen_port=8080"]
 
 # ---------------------------------------------------------------------------
 # MCP server target  –  stdio by default, override for SSE
@@ -61,7 +64,7 @@ ENTRYPOINT ["mitmdump", "-s", "proxy_addon.py", "--set", "listen_port=8080"]
 FROM base AS mcp
 
 EXPOSE 8000
-ENTRYPOINT ["python", "mcp_server.py"]
+ENTRYPOINT ["python", "mcp/mcp_server.py"]
 
 # ---------------------------------------------------------------------------
 # Dashboard target  –  web UI for traffic visualization
@@ -69,4 +72,4 @@ ENTRYPOINT ["python", "mcp_server.py"]
 FROM base AS dashboard
 
 EXPOSE 8002
-ENTRYPOINT ["python", "dashboard_server.py"]
+ENTRYPOINT ["python", "dashboard/dashboard_server.py"]

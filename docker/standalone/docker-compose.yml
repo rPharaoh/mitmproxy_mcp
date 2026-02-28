@@ -4,8 +4,8 @@
 services:
   mitmproxy-mcp:
     build:
-      context: ..
-      dockerfile: standalone/Dockerfile
+      context: ../..
+      dockerfile: docker/standalone/Dockerfile
     ports:
       - "8080:8080"    # mitmproxy
       - "8001:8000"    # MCP server

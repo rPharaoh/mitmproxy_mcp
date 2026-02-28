@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLMProxy Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/css/variables.css">
+    <link rel="stylesheet" href="/static/css/layout.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="stylesheet" href="/static/css/pages.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" integrity="sha512-DTOQO9RWCH3ppGqcWaEA1BIZOC6xxalwEsw9c2QQeAIftl+Vegovlnee1c9QX4TctnWMn13TZye+giMm8e2LwA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
@@ -94,6 +97,21 @@
         <div class="nav-item" data-page="clear-data">
             <span class="icon"><i class="fa-solid fa-trash-can"></i></span> Clear Data
         </div>
+
+        <div class="sidebar-footer">
+            <div class="auto-refresh-control">
+                <label class="auto-refresh-toggle">
+                    <input type="checkbox" id="auto-refresh-check">
+                    <span class="auto-refresh-label"><i class="fa-solid fa-arrows-rotate"></i> Auto-refresh</span>
+                </label>
+                <select id="auto-refresh-interval" title="Refresh interval">
+                    <option value="5">5s</option>
+                    <option value="10" selected>10s</option>
+                    <option value="30">30s</option>
+                    <option value="60">60s</option>
+                </select>
+            </div>
+        </div>
     </nav>
 
     <!-- ── Main Content ─────────────────────────────────────────────────── -->
@@ -136,14 +154,59 @@
                 <h2><span class="live-dot"></span> Live Feed</h2>
                 <p>Real-time traffic stream (auto-refreshes every 2s)</p>
             </div>
-            <div class="toolbar">
-                <button class="btn btn-primary" id="live-toggle"><i class="fa-solid fa-pause"></i> Pause</button>
-                <input type="text" id="live-search" placeholder="Search URLs..." style="max-width:200px;">
-                <select id="live-domain-filter">
-                    <option value="">All Domains</option>
-                </select>
-                <span id="live-count" style="color:var(--text-muted);font-size:13px;"></span>
-                <div style="margin-left:auto;"><button class="btn btn-sm view-toggle" id="live-view-toggle" onclick="toggleViewMode()" title="Toggle side panel / modal"><i class="fa-solid fa-table-columns"></i></button></div>
+            <div class="filter-bar">
+                <div class="filter-bar-row">
+                    <button class="btn btn-primary" id="live-toggle"><i class="fa-solid fa-pause"></i> Pause</button>
+                    <div class="filter-group">
+                        <label><i class="fa-solid fa-magnifying-glass"></i></label>
+                        <input type="text" id="live-search" placeholder="Filter by URL...">
+                    </div>
+                    <div class="filter-group">
+                        <label>Host</label>
+                        <select id="live-domain-filter">
+                            <option value="">All</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Method</label>
+                        <select id="live-method-filter">
+                            <option value="">All</option>
+                            <option>GET</option><option>POST</option><option>PUT</option>
+                            <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Status</label>
+                        <select id="live-status-filter">
+                            <option value="">All</option>
+                            <option value="1xx">1xx Info</option>
+                            <option value="2xx">2xx Success</option>
+                            <option value="3xx">3xx Redirect</option>
+                            <option value="4xx">4xx Client Err</option>
+                            <option value="5xx">5xx Server Err</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>MIME</label>
+                        <select id="live-mime-filter">
+                            <option value="">All</option>
+                            <option value="html">HTML</option>
+                            <option value="json">JSON</option>
+                            <option value="xml">XML</option>
+                            <option value="script">Script</option>
+                            <option value="css">CSS</option>
+                            <option value="image">Images</option>
+                            <option value="font">Fonts</option>
+                            <option value="media">Media</option>
+                            <option value="text">Plain Text</option>
+                        </select>
+                    </div>
+                    <span id="live-count" class="filter-count"></span>
+                    <div class="filter-actions">
+                        <button class="btn btn-sm" onclick="clearLiveFilters()" title="Clear all filters"><i class="fa-solid fa-filter-circle-xmark"></i></button>
+                        <button class="btn btn-sm view-toggle" id="live-view-toggle" onclick="toggleViewMode()" title="Toggle side panel / modal"><i class="fa-solid fa-table-columns"></i></button>
+                    </div>
+                </div>
             </div>
             <div class="split-view" id="live-split-view">
                 <div class="split-list">
@@ -169,29 +232,73 @@
                 <h2>Requests</h2>
                 <p>Browse and search captured HTTP traffic</p>
             </div>
-            <div class="toolbar">
-                <input type="text" id="req-search" placeholder="Search URLs, bodies...">
-                <select id="req-domain">
-                    <option value="">All Domains</option>
-                </select>
-                <select id="req-method">
-                    <option value="">All Methods</option>
-                    <option>GET</option><option>POST</option><option>PUT</option>
-                    <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
-                </select>
-                <select id="req-limit">
-                    <option value="25">25</option>
-                    <option value="50" selected>50</option>
-                    <option value="100">100</option>
-                    <option value="200">200</option>
-                </select>
-                <button class="btn btn-primary" onclick="loadRequests()"><i class="fa-solid fa-magnifying-glass"></i> Search</button>
-                <div style="margin-left:auto;"><button class="btn btn-sm view-toggle" id="req-view-toggle" onclick="toggleViewMode()" title="Toggle side panel / modal"><i class="fa-solid fa-table-columns"></i></button></div>
+            <div class="filter-bar">
+                <div class="filter-bar-row">
+                    <div class="filter-group">
+                        <label><i class="fa-solid fa-magnifying-glass"></i></label>
+                        <input type="text" id="req-search" placeholder="Filter by URL, body...">
+                    </div>
+                    <div class="filter-group">
+                        <label>Host</label>
+                        <select id="req-domain">
+                            <option value="">All</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Method</label>
+                        <select id="req-method">
+                            <option value="">All</option>
+                            <option>GET</option><option>POST</option><option>PUT</option>
+                            <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Status</label>
+                        <select id="req-status">
+                            <option value="">All</option>
+                            <option value="1xx">1xx Info</option>
+                            <option value="2xx">2xx Success</option>
+                            <option value="3xx">3xx Redirect</option>
+                            <option value="4xx">4xx Client Err</option>
+                            <option value="5xx">5xx Server Err</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>MIME</label>
+                        <select id="req-mime">
+                            <option value="">All</option>
+                            <option value="html">HTML</option>
+                            <option value="json">JSON</option>
+                            <option value="xml">XML</option>
+                            <option value="script">Script</option>
+                            <option value="css">CSS</option>
+                            <option value="image">Images</option>
+                            <option value="font">Fonts</option>
+                            <option value="media">Media</option>
+                            <option value="text">Plain Text</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>Show</label>
+                        <select id="req-limit">
+                            <option value="25">25</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                            <option value="200">200</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" onclick="loadRequests()"><i class="fa-solid fa-magnifying-glass"></i> Search</button>
+                    <div class="filter-actions">
+                        <button class="btn btn-sm" onclick="clearReqFilters()" title="Clear all filters"><i class="fa-solid fa-filter-circle-xmark"></i></button>
+                        <button class="btn btn-sm view-toggle" id="req-view-toggle" onclick="toggleViewMode()" title="Toggle side panel / modal"><i class="fa-solid fa-table-columns"></i></button>
+                    </div>
+                </div>
             </div>
             <div class="split-view">
                 <div class="split-list" id="requests-split-list">
                     <div class="card">
                         <div class="table-container" id="requests-table"></div>
+                        <div class="pagination" id="requests-pagination" style="display:none;"></div>
                     </div>
                 </div>
                 <div class="split-detail" id="requests-side-panel">
@@ -444,6 +551,14 @@
     </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/js/core.js"></script>
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/nav.js"></script>
+<script src="/static/js/overview.js"></script>
+<script src="/static/js/live.js"></script>
+<script src="/static/js/requests.js"></script>
+<script src="/static/js/detail.js"></script>
+<script src="/static/js/pages.js"></script>
+<script src="/static/js/init.js"></script>
 </body>
 </html>

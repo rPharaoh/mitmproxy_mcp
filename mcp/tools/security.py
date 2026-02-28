@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import db
+import storage.db as db
 
 SECURITY_HEADERS = {
     "strict-transport-security": "HSTS – enforces HTTPS",

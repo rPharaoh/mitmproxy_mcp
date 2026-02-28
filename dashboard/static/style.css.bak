@@ -124,7 +124,7 @@ body {
     width: 240px;
     background: var(--bg-secondary);
     border-right: 1px solid var(--border);
-    padding: 20px 0;
+    padding: 20px 0 0;
     position: fixed;
     top: 0;
     left: 0;
@@ -132,6 +132,8 @@ body {
     overflow-y: auto;
     z-index: 100;
     transition: transform var(--transition);
+    display: flex;
+    flex-direction: column;
 }
 
 .sidebar-header {
@@ -218,6 +220,63 @@ body {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+}
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+}
+
+.auto-refresh-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.auto-refresh-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-muted);
+    user-select: none;
+}
+
+.auto-refresh-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+}
+
+.auto-refresh-toggle:has(input:checked) .auto-refresh-label {
+    color: var(--accent);
+}
+
+.auto-refresh-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    transition: color var(--transition);
+}
+
+.auto-refresh-control select {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    outline: none;
+    cursor: pointer;
+    width: 52px;
+}
+
+.auto-refresh-control select:focus {
+    border-color: var(--accent);
 }
 
 .main {
@@ -309,6 +368,36 @@ body {
 
 .table-container {
     overflow-x: auto;
+}
+
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.pagination-info {
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.pagination-buttons {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+.pagination-buttons .btn-sm {
+    min-width: 32px;
+    justify-content: center;
+    padding: 4px 8px;
+}
+.pagination-buttons .btn-sm:disabled {
+    opacity: 0.35;
+    cursor: default;
+    pointer-events: none;
 }
 
 table {
@@ -403,7 +492,7 @@ tbody tr.clickable {
     height: 300px;
 }
 
-/* ── Toolbar ────────────────────────────────────────────────────────────── */
+/* ── Toolbar (legacy) ───────────────────────────────────────────────────── */
 
 .toolbar {
     display: flex;
@@ -432,6 +521,81 @@ tbody tr.clickable {
 
 .toolbar input[type="text"] {
     min-width: 250px;
+}
+
+/* ── Filter Bar (Burp/ZAP-style) ──────────────────────────────────────── */
+
+.filter-bar {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+}
+
+.filter-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.filter-group {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.filter-group label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.filter-group input[type="text"],
+.filter-group select {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 10px;
+    color: var(--text-primary);
+    font-size: 12px;
+    outline: none;
+    transition: border-color var(--transition);
+}
+
+.filter-group input[type="text"]:focus,
+.filter-group select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.filter-group input[type="text"] {
+    min-width: 180px;
+    max-width: 220px;
+}
+
+.filter-group select {
+    min-width: 70px;
+    max-width: 150px;
+    cursor: pointer;
+}
+
+.filter-count {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.filter-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
 }
 
 .btn {

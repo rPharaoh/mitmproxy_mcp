@@ -28,7 +28,7 @@ import re
 import time
 from mitmproxy import http, websocket, ctx
 
-import db
+import storage.db as db
 
 logger = logging.getLogger("llmproxy.addon")
 
