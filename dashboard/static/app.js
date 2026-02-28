@@ -299,8 +299,13 @@ const navItems = document.querySelectorAll('.nav-item[data-page]');
 const pageSections = document.querySelectorAll('.page-section');
 
 function navigateTo(page) {
+    _activePage = page;
     navItems.forEach(n => n.classList.toggle('active', n.dataset.page === page));
     pageSections.forEach(p => p.classList.toggle('active', p.id === 'page-' + page));
+
+    // Close side panels when leaving their pages
+    if (page !== 'requests') closeSidePanel();
+    if (page !== 'live') closeLiveSidePanel();
 
     // Stop live feed when leaving that page
     if (page !== 'live') stopLive();
@@ -319,6 +324,9 @@ function navigateTo(page) {
         'api-map': loadApiMap,
         'blocked': loadBlocked,
         'rules': loadRules,
+        'tokens': loadTokens,
+        'export': loadExport,
+        'clear-data': loadClearData,
     };
     if (loaders[page]) loaders[page]();
 }
@@ -422,21 +430,121 @@ function statCard(label, value, changeClass) {
 document.getElementById('summary-hours')?.addEventListener('change', loadOverview);
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PAGE: Live Feed
+// PAGE: Live Feed (SSE with polling fallback)
 // ═══════════════════════════════════════════════════════════════════════════
+
+let _liveEventSource = null;
+let _liveDomainFilter = '';
+let _liveSearch = '';
 
 function startLive() {
     livePaused = false;
     document.getElementById('live-toggle').innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
+    document.getElementById('live-feed-list').innerHTML = '';
+
+    // Load domains for the filter dropdown
+    _loadLiveDomains();
+
+    // Clean up any existing connections
+    stopLive();
+
+    // Try SSE first, fall back to polling
+    _startSSE();
+}
+
+async function _loadLiveDomains() {
+    try {
+        const data = await api('/api/domains?limit=100');
+        const sel = document.getElementById('live-domain-filter');
+        const current = sel.value;
+        sel.innerHTML = '<option value="">All Domains</option>';
+        (data || []).forEach(d => {
+            sel.innerHTML += `<option value="${esc(d.host)}">${esc(d.host)}</option>`;
+        });
+        sel.value = current || '';
+    } catch(e) {}
+}
+
+async function _loadReqDomains() {
+    try {
+        const data = await api('/api/domains?limit=100');
+        const sel = document.getElementById('req-domain');
+        if (!sel) return;
+        const current = sel.value;
+        sel.innerHTML = '<option value="">All Domains</option>';
+        (data || []).forEach(d => {
+            sel.innerHTML += `<option value="${esc(d.host)}">${esc(d.host)}</option>`;
+        });
+        sel.value = current || '';
+    } catch(e) {}
+}
+
+document.getElementById('live-domain-filter')?.addEventListener('change', () => {
+    _liveDomainFilter = document.getElementById('live-domain-filter').value;
+    // Restart the stream with the new filter
+    document.getElementById('live-feed-list').innerHTML = '';
+    stopLive();
+    _startSSE();
+});
+
+let _liveSearchDebounce = null;
+document.getElementById('live-search')?.addEventListener('input', () => {
+    clearTimeout(_liveSearchDebounce);
+    _liveSearchDebounce = setTimeout(() => {
+        _liveSearch = document.getElementById('live-search').value.trim();
+        document.getElementById('live-feed-list').innerHTML = '';
+        stopLive();
+        _startSSE();
+    }, 400);
+});
+
+function _startSSE() {
+    try {
+        let url = '/api/live/stream';
+        const params = [];
+        if (_authToken) params.push('token=' + encodeURIComponent(_authToken));
+        if (_liveDomainFilter) params.push('host=' + encodeURIComponent(_liveDomainFilter));
+        if (_liveSearch) params.push('search=' + encodeURIComponent(_liveSearch));
+        if (params.length) url += '?' + params.join('&');
+
+        _liveEventSource = new EventSource(url);
+
+        _liveEventSource.onmessage = (event) => {
+            if (livePaused) return;
+            try {
+                const data = JSON.parse(event.data);
+                _renderLiveItems(data.http || [], data.ws || []);
+            } catch (e) {
+                console.error('SSE parse error:', e);
+            }
+        };
+
+        _liveEventSource.onerror = () => {
+            // SSE failed, fall back to polling
+            console.warn('SSE connection lost, falling back to polling');
+            _liveEventSource.close();
+            _liveEventSource = null;
+            _startPolling();
+        };
+
+    } catch (e) {
+        _startPolling();
+    }
+}
+
+function _startPolling() {
     liveCursorHttp = null;
     liveCursorWs = null;
-    document.getElementById('live-feed-list').innerHTML = '';
     if (liveInterval) clearInterval(liveInterval);
     pollLive();
     liveInterval = setInterval(pollLive, 2000);
 }
 
 function stopLive() {
+    if (_liveEventSource) {
+        _liveEventSource.close();
+        _liveEventSource = null;
+    }
     if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
 }
 
@@ -445,46 +553,50 @@ document.getElementById('live-toggle')?.addEventListener('click', () => {
     document.getElementById('live-toggle').innerHTML = livePaused ? '<i class="fa-solid fa-play"></i> Resume' : '<i class="fa-solid fa-pause"></i> Pause';
 });
 
+function _renderLiveItems(httpReqs, wsMsgs) {
+    const list = document.getElementById('live-feed-list');
+    const items = [];
+
+    httpReqs.forEach(r => {
+        items.push(`<div class="live-feed-item clickable" data-id="${esc(r.id)}" onclick="showRequestDetail('${esc(r.id)}')">
+            <span class="time">${formatTime(r.timestamp)}</span>
+            ${methodBadge(r.method)}
+            ${statusBadge(r.status_code)}
+            <span class="url">${esc(r.url)}</span>
+            <span class="duration">${formatDuration(r.duration_ms)}</span>
+        </div>`);
+    });
+
+    wsMsgs.forEach(m => {
+        items.push(`<div class="live-feed-item">
+            <span class="time">${formatTime(m.timestamp)}</span>
+            <span class="badge badge-method">${esc(m.direction)}</span>
+            <span class="url">WS: ${esc(m.host)} ${esc(m.content?.substring(0, 120) || '')}</span>
+        </div>`);
+    });
+
+    if (items.length > 0) {
+        list.insertAdjacentHTML('afterbegin', items.join(''));
+        while (list.children.length > 500) list.removeChild(list.lastChild);
+    }
+
+    document.getElementById('live-count').textContent = `${list.children.length} items captured`;
+}
+
 async function pollLive() {
     if (livePaused) return;
     try {
         let url = '/api/live?limit=50';
         if (liveCursorHttp) url += '&after_id=' + encodeURIComponent(liveCursorHttp);
         if (liveCursorWs) url += '&after_ws_id=' + encodeURIComponent(liveCursorWs);
+        if (_liveDomainFilter) url += '&host=' + encodeURIComponent(_liveDomainFilter);
+        if (_liveSearch) url += '&search=' + encodeURIComponent(_liveSearch);
         const data = await api(url);
 
         if (data.http?.cursor) liveCursorHttp = data.http.cursor;
         if (data.ws?.cursor) liveCursorWs = data.ws.cursor;
 
-        const list = document.getElementById('live-feed-list');
-        const items = [];
-
-        (data.http?.requests || []).forEach(r => {
-            items.push(`<div class="live-feed-item clickable" onclick="showRequestDetail('${esc(r.id)}')">
-                <span class="time">${formatTime(r.timestamp)}</span>
-                ${methodBadge(r.method)}
-                ${statusBadge(r.status_code)}
-                <span class="url">${esc(r.url)}</span>
-                <span class="duration">${formatDuration(r.duration_ms)}</span>
-            </div>`);
-        });
-
-        (data.ws?.messages || []).forEach(m => {
-            items.push(`<div class="live-feed-item">
-                <span class="time">${formatTime(m.timestamp)}</span>
-                <span class="badge badge-method">${esc(m.direction)}</span>
-                <span class="url">WS: ${esc(m.host)} ${esc(m.content?.substring(0, 120) || '')}</span>
-            </div>`);
-        });
-
-        if (items.length > 0) {
-            list.insertAdjacentHTML('afterbegin', items.join(''));
-            // Keep max 500 items
-            while (list.children.length > 500) list.removeChild(list.lastChild);
-        }
-
-        const total = (list.children.length);
-        document.getElementById('live-count').textContent = `${total} items captured`;
+        _renderLiveItems(data.http?.requests || [], data.ws?.messages || []);
 
     } catch (e) {
         console.error('Live poll error:', e);
@@ -496,13 +608,17 @@ async function pollLive() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function loadRequests() {
+    // Load domains for the filter dropdown
+    _loadReqDomains();
     try {
         const search = document.getElementById('req-search')?.value || '';
         const method = document.getElementById('req-method')?.value || '';
+        const domain = document.getElementById('req-domain')?.value || '';
         const limit = document.getElementById('req-limit')?.value || '50';
 
         let url = `/api/requests?limit=${limit}`;
         if (method) url += `&method=${method}`;
+        if (domain) url += `&host=${encodeURIComponent(domain)}`;
         if (search) url += `&search=${encodeURIComponent(search)}`;
 
         const data = await api(url);
@@ -524,7 +640,7 @@ function requestsTable(rows) {
         <thead><tr>
             <th>Time</th><th>Method</th><th>Status</th><th>Host</th><th>Path</th><th>Duration</th><th>Size</th>
         </tr></thead>
-        <tbody>${rows.map(r => `<tr class="clickable" onclick="showRequestDetail('${esc(r.id)}')">
+        <tbody>${rows.map(r => `<tr class="clickable" data-id="${esc(r.id)}" onclick="showRequestDetail('${esc(r.id)}')">
             <td>${formatTime(r.timestamp)}</td>
             <td>${methodBadge(r.method)}</td>
             <td>${statusBadge(r.status_code)}</td>
@@ -536,56 +652,155 @@ function requestsTable(rows) {
     </table>`;
 }
 
-// ─── Request Detail Modal ──────────────────────────────────────────────────
+// ─── Request Detail Modal & Side Panel ─────────────────────────────────────
+
+let _activePage = 'overview';
+let _viewMode = localStorage.getItem('llmproxy_view_mode') || 'panel'; // 'panel' or 'modal'
+
+function toggleViewMode() {
+    _viewMode = _viewMode === 'panel' ? 'modal' : 'panel';
+    localStorage.setItem('llmproxy_view_mode', _viewMode);
+    _updateViewToggleButtons();
+    // Close any open panels when switching to modal mode
+    if (_viewMode === 'modal') {
+        closeSidePanel();
+        closeLiveSidePanel();
+    }
+}
+
+function _updateViewToggleButtons() {
+    const icon = _viewMode === 'panel' ? 'fa-table-columns' : 'fa-expand';
+    const tip = _viewMode === 'panel' ? 'Using side panel (click for modal)' : 'Using modal (click for side panel)';
+    document.querySelectorAll('.view-toggle').forEach(btn => {
+        btn.innerHTML = `<i class="fa-solid ${icon}"></i>`;
+        btn.title = tip;
+        btn.classList.toggle('active', _viewMode === 'panel');
+    });
+}
+
+// Initialize toggle buttons on load
+document.addEventListener('DOMContentLoaded', _updateViewToggleButtons);
+
+function _renderDetailContent(r, curlCmd) {
+    return `
+        <div class="detail-row"><div class="detail-label">URL</div><div class="detail-value">${esc(r.url)}</div></div>
+        <div class="detail-row"><div class="detail-label">Method</div><div class="detail-value">${methodBadge(r.method)}</div></div>
+        <div class="detail-row"><div class="detail-label">Status</div><div class="detail-value">${statusBadge(r.status_code)}</div></div>
+        <div class="detail-row"><div class="detail-label">Host</div><div class="detail-value">${esc(r.host)}</div></div>
+        <div class="detail-row"><div class="detail-label">Path</div><div class="detail-value">${esc(r.path)}</div></div>
+        <div class="detail-row"><div class="detail-label">Scheme</div><div class="detail-value">${esc(r.scheme)}</div></div>
+        <div class="detail-row"><div class="detail-label">Duration</div><div class="detail-value">${formatDuration(r.duration_ms)}</div></div>
+        <div class="detail-row"><div class="detail-label">Content Type</div><div class="detail-value">${esc(r.content_type)}</div></div>
+        <div class="detail-row"><div class="detail-label">Content Length</div><div class="detail-value">${formatBytes(r.content_length)}</div></div>
+        <div class="detail-row"><div class="detail-label">Timestamp</div><div class="detail-value">${formatDateTime(r.timestamp)}</div></div>
+        ${r.tenant_id ? `<div class="detail-row"><div class="detail-label">Tenant</div><div class="detail-value">${esc(r.tenant_id)}</div></div>` : ''}
+
+        <h3 style="margin-top:20px;font-size:14px;color:var(--text-secondary);">Request Headers</h3>
+        <pre class="body-preview">${esc(typeof r.request_headers === 'object' ? JSON.stringify(r.request_headers, null, 2) : r.request_headers)}</pre>
+
+        ${r.request_body ? `<h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">Request Body</h3>
+        <pre class="body-preview">${esc(tryPrettyJson(r.request_body))}</pre>` : ''}
+
+        <h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">Response Headers</h3>
+        <pre class="body-preview">${esc(typeof r.response_headers === 'object' ? JSON.stringify(r.response_headers, null, 2) : r.response_headers)}</pre>
+
+        ${r.response_body ? `<h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">Response Body</h3>
+        <pre class="body-preview">${esc(tryPrettyJson(r.response_body))}</pre>` : ''}
+
+        ${curlCmd ? `<h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">cURL Command</h3>
+        <pre class="body-preview" style="user-select:all;">${esc(curlCmd)}</pre>` : ''}
+    `;
+}
+
+async function _fetchDetailData(id) {
+    const r = await api(`/api/requests/${id}`);
+    let curlCmd = '';
+    try {
+        const c = await api(`/api/curl/${id}`);
+        curlCmd = c.curl || '';
+    } catch(_) {}
+    return { r, curlCmd };
+}
 
 async function showRequestDetail(id) {
+    if (_viewMode === 'panel' && _activePage === 'requests') {
+        showInSidePanel(id);
+    } else if (_viewMode === 'panel' && _activePage === 'live') {
+        showInLiveSidePanel(id);
+    } else {
+        showInModal(id);
+    }
+}
+
+async function showInModal(id) {
     const modal = document.getElementById('request-modal');
     const body = document.getElementById('request-modal-body');
     body.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
     modal.classList.add('open');
-
     try {
-        const r = await api(`/api/requests/${id}`);
-        let curlCmd = '';
-        try {
-            const c = await api(`/api/curl/${id}`);
-            curlCmd = c.curl || '';
-        } catch(_) {}
-
-        const reqHeaders = r.request_headers;
-        const resHeaders = r.response_headers;
-
-        body.innerHTML = `
-            <div class="detail-row"><div class="detail-label">URL</div><div class="detail-value">${esc(r.url)}</div></div>
-            <div class="detail-row"><div class="detail-label">Method</div><div class="detail-value">${methodBadge(r.method)}</div></div>
-            <div class="detail-row"><div class="detail-label">Status</div><div class="detail-value">${statusBadge(r.status_code)}</div></div>
-            <div class="detail-row"><div class="detail-label">Host</div><div class="detail-value">${esc(r.host)}</div></div>
-            <div class="detail-row"><div class="detail-label">Path</div><div class="detail-value">${esc(r.path)}</div></div>
-            <div class="detail-row"><div class="detail-label">Scheme</div><div class="detail-value">${esc(r.scheme)}</div></div>
-            <div class="detail-row"><div class="detail-label">Duration</div><div class="detail-value">${formatDuration(r.duration_ms)}</div></div>
-            <div class="detail-row"><div class="detail-label">Content Type</div><div class="detail-value">${esc(r.content_type)}</div></div>
-            <div class="detail-row"><div class="detail-label">Content Length</div><div class="detail-value">${formatBytes(r.content_length)}</div></div>
-            <div class="detail-row"><div class="detail-label">Timestamp</div><div class="detail-value">${formatDateTime(r.timestamp)}</div></div>
-            ${r.tenant_id ? `<div class="detail-row"><div class="detail-label">Tenant</div><div class="detail-value">${esc(r.tenant_id)}</div></div>` : ''}
-
-            <h3 style="margin-top:20px;font-size:14px;color:var(--text-secondary);">Request Headers</h3>
-            <pre class="body-preview">${esc(typeof reqHeaders === 'object' ? JSON.stringify(reqHeaders, null, 2) : reqHeaders)}</pre>
-
-            ${r.request_body ? `<h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">Request Body</h3>
-            <pre class="body-preview">${esc(tryPrettyJson(r.request_body))}</pre>` : ''}
-
-            <h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">Response Headers</h3>
-            <pre class="body-preview">${esc(typeof resHeaders === 'object' ? JSON.stringify(resHeaders, null, 2) : resHeaders)}</pre>
-
-            ${r.response_body ? `<h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">Response Body</h3>
-            <pre class="body-preview">${esc(tryPrettyJson(r.response_body))}</pre>` : ''}
-
-            ${curlCmd ? `<h3 style="margin-top:16px;font-size:14px;color:var(--text-secondary);">cURL Command</h3>
-            <pre class="body-preview" style="user-select:all;">${esc(curlCmd)}</pre>` : ''}
-        `;
+        const { r, curlCmd } = await _fetchDetailData(id);
+        body.innerHTML = _renderDetailContent(r, curlCmd);
     } catch (e) {
         body.innerHTML = `<div class="empty-state"><p>Error loading request detail</p></div>`;
     }
+}
+
+async function showInSidePanel(id) {
+    const splitView = document.querySelector('#page-requests .split-view');
+    const panelBody = document.getElementById('side-panel-body');
+    if (!splitView || !panelBody) { showInModal(id); return; }
+
+    splitView.classList.add('panel-open');
+    panelBody.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+
+    // Highlight selected row
+    splitView.querySelectorAll('tr.selected').forEach(tr => tr.classList.remove('selected'));
+    const clickedRow = splitView.querySelector(`tr[data-id="${id}"]`);
+    if (clickedRow) clickedRow.classList.add('selected');
+
+    try {
+        const { r, curlCmd } = await _fetchDetailData(id);
+        panelBody.innerHTML = _renderDetailContent(r, curlCmd);
+    } catch (e) {
+        panelBody.innerHTML = `<div class="empty-state"><p>Error loading request detail</p></div>`;
+    }
+}
+
+function closeSidePanel() {
+    const splitView = document.querySelector('#page-requests .split-view');
+    if (splitView) splitView.classList.remove('panel-open');
+    const panelBody = document.getElementById('side-panel-body');
+    if (panelBody) panelBody.innerHTML = '<div class="empty-state"><div class="icon"><i class="fa-solid fa-arrow-pointer"></i></div><p>Click a request to view details</p></div>';
+    document.querySelectorAll('#page-requests tr.selected').forEach(tr => tr.classList.remove('selected'));
+}
+
+async function showInLiveSidePanel(id) {
+    const splitView = document.getElementById('live-split-view');
+    const panelBody = document.getElementById('live-side-panel-body');
+    if (!splitView || !panelBody) { showInModal(id); return; }
+
+    splitView.classList.add('panel-open');
+    panelBody.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+
+    // Highlight selected live feed item
+    splitView.querySelectorAll('.live-feed-item.selected').forEach(el => el.classList.remove('selected'));
+    const clickedItem = splitView.querySelector(`.live-feed-item[data-id="${id}"]`);
+    if (clickedItem) clickedItem.classList.add('selected');
+
+    try {
+        const { r, curlCmd } = await _fetchDetailData(id);
+        panelBody.innerHTML = _renderDetailContent(r, curlCmd);
+    } catch (e) {
+        panelBody.innerHTML = `<div class="empty-state"><p>Error loading request detail</p></div>`;
+    }
+}
+
+function closeLiveSidePanel() {
+    const splitView = document.getElementById('live-split-view');
+    if (splitView) splitView.classList.remove('panel-open');
+    const panelBody = document.getElementById('live-side-panel-body');
+    if (panelBody) panelBody.innerHTML = '<div class="empty-state"><div class="icon"><i class="fa-solid fa-arrow-pointer"></i></div><p>Click a request to view details</p></div>';
+    document.querySelectorAll('#page-live .live-feed-item.selected').forEach(el => el.classList.remove('selected'));
 }
 
 function tryPrettyJson(s) {
@@ -661,7 +876,7 @@ async function loadDomains() {
             <tbody>${data.map(d => `<tr>
                 <td><strong>${esc(d.host)}</strong></td>
                 <td>${d.total_requests}</td>
-                <td>${(d.methods || []).map(m => methodBadge(m)).join(' ')}</td>
+                <td>${(Array.isArray(d.methods) ? d.methods : (d.methods || '').split(',')).filter(Boolean).map(m => methodBadge(m)).join(' ')}</td>
                 <td>${formatDuration(d.avg_duration_ms)}</td>
                 <td>${formatBytes(d.total_bytes)}</td>
                 <td>${formatDateTime(d.first_seen)}</td>
@@ -932,7 +1147,7 @@ function renderPrivacyTab(tab) {
                 <td><strong>${esc(d.host)}</strong></td>
                 <td><span class="badge badge-method">${esc(d.category)}</span></td>
                 <td>${d.total_requests}</td><td>${formatBytes(d.total_bytes)}</td>
-                <td>${(d.methods || []).map(m => methodBadge(m)).join(' ')}</td>
+                <td>${(Array.isArray(d.methods) ? d.methods : (d.methods || '').split(',')).filter(Boolean).map(m => methodBadge(m)).join(' ')}</td>
                 <td>${d.errors || 0}</td>
             </tr>`).join('')}</tbody></table></div>`;
     } else if (tab === 'priv-cookies') {
@@ -1101,6 +1316,253 @@ async function loadRules() {
         </table>`;
     } catch (e) {
         document.getElementById('rules-table').innerHTML = `<div class="empty-state"><p>Error loading rules</p></div>`;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PAGE: Tokens
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadTokens() {
+    const el = document.getElementById('tokens-list');
+    if (!el) return;
+    // Hide any previous create result
+    const resEl = document.getElementById('token-create-result');
+    if (resEl) resEl.style.display = 'none';
+    try {
+        const tokens = await api('/api/tokens');
+        if (!tokens || !tokens.length) {
+            el.innerHTML = '<div class="empty-state"><div class="icon"><i class="fa-solid fa-key"></i></div><p>No tokens found</p></div>';
+            return;
+        }
+        el.innerHTML = `<table>
+            <thead><tr><th>Name</th><th>Tenant ID</th><th>Token</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+            <tbody>${tokens.map(t => {
+                const status = t.active !== false
+                    ? '<span style="color:var(--green);"><i class="fa-solid fa-circle-check"></i> Active</span>'
+                    : '<span style="color:var(--text-muted);"><i class="fa-solid fa-circle-xmark"></i> Revoked</span>';
+                const created = t.created_at ? new Date(t.created_at).toLocaleString() : '—';
+                const revokeBtn = t.active !== false
+                    ? `<button class="btn btn-sm btn-danger" onclick="revokeToken('${esc(t.id)}')"><i class="fa-solid fa-ban"></i> Revoke</button>`
+                    : '';
+                return `<tr>
+                    <td><strong>${esc(t.name || '—')}</strong></td>
+                    <td><code style="font-size:11px;">${esc(t.tenant_id || '—')}</code></td>
+                    <td><code style="font-size:11px;">${esc(t.token || '—')}</code></td>
+                    <td>${status}</td>
+                    <td>${created}</td>
+                    <td>${revokeBtn}</td>
+                </tr>`;
+            }).join('')}</tbody>
+        </table>`;
+    } catch (e) {
+        el.innerHTML = '<div class="empty-state"><p>Error loading tokens</p></div>';
+    }
+}
+
+async function createToken() {
+    const nameInput = document.getElementById('token-name');
+    const name = (nameInput?.value || '').trim();
+    if (!name) { alert('Please enter a name for the token'); return; }
+
+    const resEl = document.getElementById('token-create-result');
+    try {
+        const result = await apiPost('/api/tokens', { name });
+        if (result.error) {
+            resEl.innerHTML = `<div class="card" style="border-color:var(--red);"><div style="padding:12px;">
+                <strong style="color:var(--red);"><i class="fa-solid fa-circle-xmark"></i> Error:</strong> ${esc(result.error)}
+            </div></div>`;
+        } else {
+            resEl.innerHTML = `<div class="card" style="border-color:var(--green);"><div style="padding:12px;">
+                <strong style="color:var(--green);"><i class="fa-solid fa-circle-check"></i> Token Created</strong>
+                <p style="margin:8px 0 4px;font-size:13px;color:var(--text-muted);">Copy this token now — it won't be shown again.</p>
+                <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+                    <input type="text" id="new-token-value" value="${esc(result.token)}" readonly style="flex:1;font-family:monospace;font-size:13px;">
+                    <button class="btn btn-sm" onclick="copyNewToken()"><i class="fa-solid fa-copy"></i> Copy</button>
+                </div>
+                <p style="margin-top:6px;font-size:12px;color:var(--text-muted);">Name: <strong>${esc(result.name)}</strong> · Tenant: <code>${esc(result.tenant_id)}</code></p>
+            </div></div>`;
+        }
+        resEl.style.display = 'block';
+        nameInput.value = '';
+        // Refresh the token list
+        loadTokens();
+    } catch (e) {
+        resEl.innerHTML = `<div class="card" style="border-color:var(--red);"><div style="padding:12px;">
+            <strong style="color:var(--red);"><i class="fa-solid fa-circle-xmark"></i> Failed to create token</strong>
+        </div></div>`;
+        resEl.style.display = 'block';
+    }
+}
+
+function copyNewToken() {
+    const input = document.getElementById('new-token-value');
+    if (input) {
+        input.select();
+        navigator.clipboard.writeText(input.value).then(() => {
+            input.style.borderColor = 'var(--green)';
+            setTimeout(() => { input.style.borderColor = ''; }, 1500);
+        });
+    }
+}
+
+async function revokeToken(docId) {
+    if (!confirm('Revoke this token? This action cannot be undone.')) return;
+    try {
+        const result = await apiPost('/api/tokens/revoke', { id: docId });
+        if (result.error) {
+            alert('Error: ' + result.error);
+        }
+        loadTokens();
+    } catch (e) {
+        alert('Failed to revoke token');
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PAGE: Clear Data
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadClearData() {
+    const sel = document.getElementById('clear-tenant-select');
+    if (!sel) return;
+    // Populate tenant dropdown
+    try {
+        const tenants = await api('/api/tenants');
+        sel.innerHTML = '<option value="">Select a tenant...</option>' +
+            tenants.map(t => `<option value="${esc(t.tenant_id)}">${esc(t.name || t.tenant_id)}</option>`).join('');
+    } catch (_) {
+        sel.innerHTML = '<option value="">No tenants available</option>';
+    }
+    document.getElementById('clear-data-result').style.display = 'none';
+}
+
+function showClearResult(data) {
+    const el = document.getElementById('clear-data-result');
+    if (!el) return;
+    const results = data.results || {};
+    const rows = Object.entries(results).map(([idx, count]) => {
+        const name = idx.replace('llmproxy-', '');
+        const val = typeof count === 'number' ? `${count} deleted` : count;
+        return `<tr><td>${esc(name)}</td><td>${esc(String(val))}</td></tr>`;
+    }).join('');
+    el.innerHTML = `<div class="card" style="border-color:var(--green);">
+        <div style="padding:12px;">
+            <strong><i class="fa-solid fa-circle-check" style="color:var(--green)"></i> Cleared: ${esc(String(data.cleared))}</strong>
+            <table style="margin-top:8px;"><thead><tr><th>Index</th><th>Result</th></tr></thead>
+            <tbody>${rows}</tbody></table>
+        </div>
+    </div>`;
+    el.style.display = 'block';
+}
+
+async function clearTenantData() {
+    const sel = document.getElementById('clear-tenant-select');
+    const tenantId = sel?.value;
+    if (!tenantId) { alert('Please select a tenant.'); return; }
+    const name = sel.options[sel.selectedIndex]?.text || tenantId;
+    if (!confirm(`Clear all data for tenant "${name}"? This cannot be undone.`)) return;
+    try {
+        const data = await apiPost('/api/clear', { tenant_id: tenantId });
+        showClearResult(data);
+    } catch (e) {
+        alert('Error clearing tenant data: ' + e.message);
+    }
+}
+
+async function clearAllData() {
+    if (!confirm('Delete ALL captured data across ALL tenants? This cannot be undone.')) return;
+    if (!confirm('Are you absolutely sure? This will delete every request, WebSocket message, tag, rule, and blocked domain.')) return;
+    try {
+        const data = await apiPost('/api/clear', { all: true });
+        showClearResult(data);
+    } catch (e) {
+        alert('Error clearing data: ' + e.message);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PAGE: Export Data
+// ═══════════════════════════════════════════════════════════════════════════
+
+function loadExport() {
+    document.getElementById('export-status').style.display = 'none';
+    // Populate domain dropdown
+    const sel = document.getElementById('export-domain');
+    if (sel) {
+        api('/api/domains?limit=100').then(domains => {
+            sel.innerHTML = '<option value="">All domains</option>' +
+                (domains || []).map(d => `<option value="${esc(d.host)}">${esc(d.host)} (${d.count})</option>`).join('');
+        }).catch(() => {});
+    }
+}
+
+function _downloadJson(data, filename) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function _showExportStatus(msg, isError) {
+    const el = document.getElementById('export-status');
+    if (!el) return;
+    el.innerHTML = `<div class="card" style="border-color:var(${isError ? '--red' : '--green'});">
+        <div style="padding:12px;">
+            <i class="fa-solid ${isError ? 'fa-circle-xmark' : 'fa-circle-check'}" style="color:var(${isError ? '--red' : '--green'})"></i> ${msg}
+        </div>
+    </div>`;
+    el.style.display = 'block';
+}
+
+async function exportRequests() {
+    const btn = document.getElementById('btn-export-req');
+    const limit = parseInt(document.getElementById('export-limit').value) || 0;
+    const host = document.getElementById('export-domain')?.value || '';
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting...';
+    _showExportStatus('Fetching data from server...', false);
+    try {
+        const tenant = getSelectedTenant();
+        let url = `/api/export/requests?limit=${limit}`;
+        if (host) url += '&host=' + encodeURIComponent(host);
+        if (tenant) url += '&tenant_id=' + encodeURIComponent(tenant);
+        const data = await api(url);
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const suffix = host ? `-${host}` : '';
+        _downloadJson(data, `llmproxy-requests${suffix}-${ts}.json`);
+        _showExportStatus(`Downloaded ${data.length} requests${host ? ' for ' + host : ''}`, false);
+    } catch (e) {
+        _showExportStatus('Export failed: ' + e.message, true);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-download"></i> Download Requests';
+    }
+}
+
+async function exportWebSocket() {
+    const btn = document.getElementById('btn-export-ws');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting...';
+    _showExportStatus('Fetching WebSocket data...', false);
+    try {
+        const tenant = getSelectedTenant();
+        let url = '/api/export/websocket?limit=0';
+        if (tenant) url += '&tenant_id=' + encodeURIComponent(tenant);
+        const data = await api(url);
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        _downloadJson(data, `llmproxy-websocket-${ts}.json`);
+        _showExportStatus(`Downloaded ${data.length} WebSocket messages`, false);
+    } catch (e) {
+        _showExportStatus('Export failed: ' + e.message, true);
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-download"></i> Download WebSocket';
     }
 }
 

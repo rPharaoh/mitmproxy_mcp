@@ -481,6 +481,183 @@ tbody tr.clickable {
 
 /* ── Modal / Detail Panel ───────────────────────────────────────────────── */
 
+/* ── Split view (requests & live feed) ──────────────────────────────────── */
+
+.split-view {
+    display: flex;
+    gap: 0;
+    min-height: 0;
+}
+
+/* When panel is open, the split-view becomes the unified container */
+.split-view.panel-open {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.split-list {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    transition: all 0.25s ease;
+}
+
+.split-view.panel-open .split-list {
+    flex: 0 0 55%;
+    max-width: 55%;
+}
+
+/* Remove card chrome from list child inside the unified container */
+.split-view.panel-open .split-list > .card {
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin-bottom: 0;
+    box-shadow: none;
+    background: transparent;
+}
+
+.split-view.panel-open .split-list .table-container,
+.split-view.panel-open .split-list #live-feed-list {
+    max-height: 78vh;
+    overflow-y: auto;
+    overflow-x: auto;
+}
+
+.split-view.panel-open .split-list table {
+    font-size: 12px;
+    table-layout: fixed;
+    width: 100%;
+}
+
+.split-view.panel-open .split-list thead th,
+.split-view.panel-open .split-list tbody td {
+    padding: 7px 6px;
+}
+
+.split-view.panel-open .split-list tbody td {
+    max-width: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.split-view.panel-open .split-list table th:nth-child(1),
+.split-view.panel-open .split-list table td:nth-child(1) { width: 65px; }
+.split-view.panel-open .split-list table th:nth-child(2),
+.split-view.panel-open .split-list table td:nth-child(2) { width: 52px; }
+.split-view.panel-open .split-list table th:nth-child(3),
+.split-view.panel-open .split-list table td:nth-child(3) { width: 46px; }
+.split-view.panel-open .split-list table th:nth-child(4),
+.split-view.panel-open .split-list table td:nth-child(4) { width: 22%; }
+.split-view.panel-open .split-list table th:nth-child(5),
+.split-view.panel-open .split-list table td:nth-child(5) { width: auto; }
+.split-view.panel-open .split-list table th:nth-child(6),
+.split-view.panel-open .split-list table td:nth-child(6) { width: 58px; }
+.split-view.panel-open .split-list table th:nth-child(7),
+.split-view.panel-open .split-list table td:nth-child(7) { width: 50px; }
+
+/* ── Detail side panel (inside unified container) ─────────────────────── */
+
+.split-detail {
+    display: none;
+    width: 0;
+    overflow: hidden;
+    transition: width 0.25s ease;
+}
+
+.split-view.panel-open .split-detail {
+    display: flex;
+    flex-direction: column;
+    width: 45%;
+    min-width: 320px;
+    border-left: 1px solid var(--border);
+    background: transparent;
+}
+
+.side-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.side-panel-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+}
+
+/* View mode toggle button */
+.btn.btn-sm {
+    padding: 5px 10px;
+    font-size: 12px;
+    min-width: auto;
+}
+
+.view-toggle {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all var(--transition);
+}
+
+.view-toggle:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
+.view-toggle.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(31, 111, 235, 0.1);
+}
+
+.side-panel-body {
+    padding: 14px;
+    overflow-y: auto;
+    flex: 1;
+    max-height: 78vh;
+}
+
+.side-panel-body .detail-row {
+    grid-template-columns: 100px 1fr;
+    gap: 6px;
+    padding: 6px 0;
+    font-size: 12px;
+}
+
+.side-panel-body .detail-value {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+
+.side-panel-body pre.body-preview {
+    font-size: 11px;
+    max-height: 200px;
+    padding: 10px;
+}
+
+.side-panel-body h3 {
+    font-size: 13px;
+}
+
+.split-list tr.selected {
+    background: var(--bg-tertiary) !important;
+    border-left: 3px solid var(--accent);
+}
+
+.live-feed-item.selected {
+    background: var(--bg-tertiary) !important;
+    border-left: 3px solid var(--accent);
+}
+
 .modal-overlay {
     display: none;
     position: fixed;

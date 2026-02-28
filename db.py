@@ -412,6 +412,24 @@ def revoke_token(token: str) -> bool:
     return True
 
 
+def revoke_token_by_id(doc_id: str) -> bool:
+    """Revoke (deactivate) a token by ES document ID."""
+    es = _get_es()
+    try:
+        doc = es.get(index=IDX_TOKENS, id=doc_id)
+    except Exception:
+        return False
+    token_val = doc["_source"].get("token", "")
+    es.update(
+        index=IDX_TOKENS, id=doc_id,
+        body={"doc": {"active": False}},
+        refresh="wait_for",
+    )
+    with _token_cache_lock:
+        _token_cache.pop(token_val, None)
+    return True
+
+
 def list_tokens() -> list[dict]:
     """List all tokens (admin only). Returns token metadata without the raw token value."""
     body = {"query": {"match_all": {}}, "sort": [{"created_at": "desc"}]}
@@ -1104,6 +1122,8 @@ def get_live_feed(
     after_ws_id: str | int | None = None,
     limit: int = 100,
     tenant_id: str | None = None,
+    host: str | None = None,
+    search: str | None = None,
 ) -> dict:
     """Return new HTTP requests and WebSocket messages since given cursors.
 
@@ -1114,6 +1134,10 @@ def get_live_feed(
     cap = min(limit, 500)
 
     t_must = _tenant_must(tenant_id)
+    if host:
+        t_must = t_must + [{"term": {"host": host}}]
+    if search:
+        t_must = t_must + [{"wildcard": {"url.raw": f"*{search}*"}}]
 
     if after_id is not None:
         must = t_must + [{"range": {"timestamp": {"gt": str(after_id)}}}]

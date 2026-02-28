@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+import asyncio
 import traceback
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, HTMLResponse, FileResponse
+from starlette.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
@@ -186,17 +187,78 @@ async def api_domains(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 async def api_live(request: Request) -> JSONResponse:
-    """GET /api/live?after_id=...&after_ws_id=... – poll-based live feed."""
+    """GET /api/live?after_id=...&after_ws_id=...&host=...&search=... – poll-based live feed."""
     try:
         data = db.get_live_feed(
             after_id=request.query_params.get("after_id"),
             after_ws_id=request.query_params.get("after_ws_id"),
             limit=_int(request.query_params.get("limit"), 100),
             tenant_id=_tenant(request),
+            host=request.query_params.get("host") or None,
+            search=request.query_params.get("search") or None,
         )
         return _json_response(data)
     except Exception as e:
         return _error(str(e), 500)
+
+
+async def api_live_stream(request: Request) -> StreamingResponse:
+    """GET /api/live/stream?host=...&search=... – Server-Sent Events for real-time feed."""
+    tenant_id = _tenant(request)
+    host = request.query_params.get("host") or None
+    search = request.query_params.get("search") or None
+
+    async def event_generator():
+        cursor_http = None
+        cursor_ws = None
+        try:
+            while True:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = db.get_live_feed(
+                        after_id=cursor_http,
+                        after_ws_id=cursor_ws,
+                        limit=50,
+                        tenant_id=tenant_id,
+                        host=host,
+                        search=search,
+                    )
+                    if data.get("http", {}).get("cursor"):
+                        cursor_http = data["http"]["cursor"]
+                    if data.get("ws", {}).get("cursor"):
+                        cursor_ws = data["ws"]["cursor"]
+
+                    http_reqs = data.get("http", {}).get("requests", [])
+                    ws_msgs = data.get("ws", {}).get("messages", [])
+
+                    if http_reqs or ws_msgs:
+                        payload = json.dumps(
+                            {"http": http_reqs, "ws": ws_msgs},
+                            default=str,
+                        )
+                        yield f"data: {payload}\n\n"
+                    else:
+                        # Send keepalive comment to detect disconnects
+                        yield ": keepalive\n\n"
+
+                except Exception:
+                    yield f"event: error\ndata: {{\"error\": \"poll error\"}}\n\n"
+
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +523,59 @@ async def api_compare(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# Route handlers – Tokens (admin-only)
+# ---------------------------------------------------------------------------
+
+async def api_list_tokens(request: Request) -> JSONResponse:
+    """GET /api/tokens – list all tokens (admin only)."""
+    if db.AUTH_REQUIRED and not getattr(request.state, "is_admin", False):
+        return _error("Admin access required", 403)
+    try:
+        tokens = db.list_tokens()
+        return _json_response(tokens)
+    except Exception as e:
+        return _error(str(e), 500)
+
+
+async def api_create_token(request: Request) -> JSONResponse:
+    """POST /api/tokens – create a new token (admin only).
+
+    Body: {"name": "My App"}
+    """
+    if db.AUTH_REQUIRED and not getattr(request.state, "is_admin", False):
+        return _error("Admin access required", 403)
+    try:
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        if not name:
+            return _error("Name is required", 400)
+        result = db.create_token(name)
+        return _json_response(result)
+    except Exception as e:
+        return _error(str(e), 500)
+
+
+async def api_revoke_token(request: Request) -> JSONResponse:
+    """POST /api/tokens/revoke – revoke a token (admin only).
+
+    Body: {"id": "es-document-id"}
+    """
+    if db.AUTH_REQUIRED and not getattr(request.state, "is_admin", False):
+        return _error("Admin access required", 403)
+    try:
+        body = await request.json()
+        doc_id = (body.get("id") or "").strip()
+        if not doc_id:
+            return _error("Token id is required", 400)
+        ok = db.revoke_token_by_id(doc_id)
+        if ok:
+            return _json_response({"revoked": True})
+        return _error("Token not found", 404)
+    except Exception as e:
+        return _error(str(e), 500)
+
+
+# ---------------------------------------------------------------------------
 # Route handlers – Tenants
 # ---------------------------------------------------------------------------
 
@@ -482,6 +597,130 @@ async def api_tenants(request: Request) -> JSONResponse:
                     "active": t.get("active", True),
                 })
         return _json_response(tenants)
+    except Exception as e:
+        return _error(str(e), 500)
+
+
+# ---------------------------------------------------------------------------
+# Route handlers – Clear Data
+# ---------------------------------------------------------------------------
+
+async def api_clear_data(request: Request) -> JSONResponse:
+    """POST /api/clear – clear captured data (admin only).
+
+    Body: {"tenant_id": "..."} to clear a specific tenant,
+          {"all": true} to clear everything.
+    """
+    if db.AUTH_REQUIRED and not getattr(request.state, "is_admin", False):
+        return _error("Admin access required", 403)
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("Invalid JSON body")
+
+    if body.get("all"):
+        # Clear all data by deleting from every tenant-scoped index
+        results = {}
+        for idx in (db.IDX_REQUESTS, db.IDX_WS, db.IDX_BLOCKED, db.IDX_TAGS, db.IDX_RULES):
+            try:
+                es = db._get_es()
+                resp = es.delete_by_query(
+                    index=idx,
+                    body={"query": {"match_all": {}}},
+                    refresh=True,
+                    conflicts="proceed",
+                )
+                results[idx] = resp.get("deleted", 0)
+            except Exception as exc:
+                results[idx] = f"error: {exc}"
+        return _json_response({"cleared": "all", "results": results})
+
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        return _error("Provide tenant_id or set all=true")
+
+    results = db.clear_tenant_data(tenant_id)
+    return _json_response({"cleared": tenant_id, "results": results})
+
+
+# ---------------------------------------------------------------------------
+# Route handlers – Export
+# ---------------------------------------------------------------------------
+
+async def api_export_requests(request: Request) -> JSONResponse:
+    """GET /api/export/requests?limit=1000&host=... – export requests as JSON array."""
+    try:
+        limit = _int(request.query_params.get("limit"), 1000)
+        host = request.query_params.get("host") or None
+        tenant_id = _tenant(request)
+        db._flush_buffer()
+
+        must = db._tenant_must(tenant_id)
+        if host:
+            must.append({"term": {"host": host}})
+        query = {"bool": {"must": must}} if must else {"match_all": {}}
+        body = {"query": query, "sort": [{"timestamp": "desc"}]}
+
+        if limit <= 0:
+            # Export all using scroll
+            es = db._get_es()
+            resp = es.search(index=db.IDX_REQUESTS, body=body, size=5000, scroll="2m")
+            rows = [db._hit_to_dict(h) for h in resp["hits"]["hits"]]
+            scroll_id = resp.get("_scroll_id")
+            while scroll_id:
+                page = es.scroll(scroll_id=scroll_id, scroll="2m")
+                hits = page["hits"]["hits"]
+                if not hits:
+                    break
+                rows.extend(db._hit_to_dict(h) for h in hits)
+                scroll_id = page.get("_scroll_id")
+            if scroll_id:
+                try:
+                    es.clear_scroll(scroll_id=scroll_id)
+                except Exception:
+                    pass
+        else:
+            rows = db._search(db.IDX_REQUESTS, body, size=min(limit, 10000))
+
+        return _json_response(rows)
+    except Exception as e:
+        return _error(str(e), 500)
+
+
+async def api_export_websocket(request: Request) -> JSONResponse:
+    """GET /api/export/websocket?limit=1000&host=... – export websocket messages as JSON array."""
+    try:
+        limit = _int(request.query_params.get("limit"), 5000)
+        host = request.query_params.get("host") or None
+        tenant_id = _tenant(request)
+
+        must = db._tenant_must(tenant_id)
+        if host:
+            must.append({"term": {"host": host}})
+        query = {"bool": {"must": must}} if must else {"match_all": {}}
+        body = {"query": query, "sort": [{"timestamp": "desc"}]}
+
+        if limit <= 0:
+            es = db._get_es()
+            resp = es.search(index=db.IDX_WS, body=body, size=5000, scroll="2m")
+            rows = [db._hit_to_dict(h) for h in resp["hits"]["hits"]]
+            scroll_id = resp.get("_scroll_id")
+            while scroll_id:
+                page = es.scroll(scroll_id=scroll_id, scroll="2m")
+                hits = page["hits"]["hits"]
+                if not hits:
+                    break
+                rows.extend(db._hit_to_dict(h) for h in hits)
+                scroll_id = page.get("_scroll_id")
+            if scroll_id:
+                try:
+                    es.clear_scroll(scroll_id=scroll_id)
+                except Exception:
+                    pass
+        else:
+            rows = db._search(db.IDX_WS, body, size=min(limit, 10000))
+
+        return _json_response(rows)
     except Exception as e:
         return _error(str(e), 500)
 
@@ -563,12 +802,20 @@ class _DashboardAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Extract Bearer token
+        # Extract Bearer token from header or query param (for SSE EventSource)
         headers = dict(scope.get("headers", []))
         auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
         token = None
         if auth.lower().startswith("bearer "):
             token = auth[7:].strip()
+
+        # Fallback: check ?token= query param (needed for EventSource/SSE)
+        if not token:
+            qs = scope.get("query_string", b"").decode("utf-8", errors="replace")
+            from urllib.parse import parse_qs
+            params = parse_qs(qs)
+            if "token" in params:
+                token = params["token"][0]
 
         if not token:
             from starlette.responses import JSONResponse as JR
@@ -621,6 +868,7 @@ routes = [
 
     # Live feed
     Route("/api/live", api_live),
+    Route("/api/live/stream", api_live_stream),
 
     # Performance
     Route("/api/performance", api_performance),
@@ -657,6 +905,18 @@ routes = [
 
     # Tenants
     Route("/api/tenants", api_tenants),
+
+    # Tokens
+    Route("/api/tokens", api_list_tokens, methods=["GET"]),
+    Route("/api/tokens", api_create_token, methods=["POST"]),
+    Route("/api/tokens/revoke", api_revoke_token, methods=["POST"]),
+
+    # Clear data
+    Route("/api/clear", api_clear_data, methods=["POST"]),
+
+    # Export
+    Route("/api/export/requests", api_export_requests),
+    Route("/api/export/websocket", api_export_websocket),
 
     # Auth
     Route("/api/auth/check", api_auth_check),
