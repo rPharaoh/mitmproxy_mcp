@@ -90,9 +90,9 @@ function updateAuthUI() {
         // Show user badge
         if (badgeEl) {
             if (_isAdmin) {
-                badgeEl.innerHTML = '<span class="user-badge admin">&#x1F451; ' + esc(_myName || 'Admin') + ' <button class="logout-btn" onclick="doLogout()">Logout</button></span>';
+                badgeEl.innerHTML = '<span class="user-badge admin"><i class="fa-solid fa-crown"></i> ' + esc(_myName || 'Admin') + ' <button class="logout-btn" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i> Logout</button></span>';
             } else {
-                badgeEl.innerHTML = '<span class="user-badge">&#x1F464; ' + esc(_myName || 'User') + ' <button class="logout-btn" onclick="doLogout()">Logout</button></span>';
+                badgeEl.innerHTML = '<span class="user-badge"><i class="fa-solid fa-user"></i> ' + esc(_myName || 'User') + ' <button class="logout-btn" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i> Logout</button></span>';
             }
             badgeEl.style.display = 'block';
         }
@@ -427,7 +427,7 @@ document.getElementById('summary-hours')?.addEventListener('change', loadOvervie
 
 function startLive() {
     livePaused = false;
-    document.getElementById('live-toggle').innerHTML = '&#x23F8; Pause';
+    document.getElementById('live-toggle').innerHTML = '<i class="fa-solid fa-pause"></i> Pause';
     liveCursorHttp = null;
     liveCursorWs = null;
     document.getElementById('live-feed-list').innerHTML = '';
@@ -442,7 +442,7 @@ function stopLive() {
 
 document.getElementById('live-toggle')?.addEventListener('click', () => {
     livePaused = !livePaused;
-    document.getElementById('live-toggle').innerHTML = livePaused ? '&#x25B6; Resume' : '&#x23F8; Pause';
+    document.getElementById('live-toggle').innerHTML = livePaused ? '<i class="fa-solid fa-play"></i> Resume' : '<i class="fa-solid fa-pause"></i> Pause';
 });
 
 async function pollLive() {
@@ -518,7 +518,7 @@ document.getElementById('req-search')?.addEventListener('keydown', e => {
 
 function requestsTable(rows) {
     if (!rows || rows.length === 0) {
-        return `<div class="empty-state"><div class="icon">&#x1F4ED;</div><p>No requests captured yet</p></div>`;
+        return `<div class="empty-state"><div class="icon"><i class="fa-solid fa-inbox"></i></div><p>No requests captured yet</p></div>`;
     }
     return `<table>
         <thead><tr>
@@ -613,7 +613,7 @@ async function loadDomains() {
     try {
         const data = await api('/api/domains?limit=20');
         if (!data || data.length === 0) {
-            document.getElementById('domains-table').innerHTML = `<div class="empty-state"><div class="icon">&#x1F3E2;</div><p>No domains captured yet</p></div>`;
+            document.getElementById('domains-table').innerHTML = `<div class="empty-state"><div class="icon"><i class="fa-solid fa-server"></i></div><p>No domains captured yet</p></div>`;
             return;
         }
 
@@ -707,7 +707,7 @@ async function loadWebSocket() {
         ].join('');
 
         if (!conns || conns.length === 0) {
-            document.getElementById('ws-connections-table').innerHTML = `<div class="empty-state"><div class="icon">&#x1F50C;</div><p>No WebSocket connections captured</p></div>`;
+            document.getElementById('ws-connections-table').innerHTML = `<div class="empty-state"><div class="icon"><i class="fa-solid fa-plug"></i></div><p>No WebSocket connections captured</p></div>`;
             return;
         }
 
@@ -945,8 +945,8 @@ function renderPrivacyTab(tab) {
             <tbody>${cookies.map(c => `<tr>
                 <td><strong>${esc(c.name)}</strong></td><td>${esc(c.host)}</td>
                 <td><span class="badge badge-method">${esc(c.category)}</span></td>
-                <td>${c.secure ? '&#x2705;' : '&#x274C;'}</td>
-                <td>${c.httponly ? '&#x2705;' : '&#x274C;'}</td>
+                <td>${c.secure ? '<i class="fa-solid fa-circle-check" style="color:var(--green)"></i>' : '<i class="fa-solid fa-circle-xmark" style="color:var(--red)"></i>'}</td>
+                <td>${c.httponly ? '<i class="fa-solid fa-circle-check" style="color:var(--green)"></i>' : '<i class="fa-solid fa-circle-xmark" style="color:var(--red)"></i>'}</td>
                 <td>${esc(c.samesite || 'None')}</td>
                 <td>${c.seen_count}</td>
             </tr>`).join('')}</tbody></table></div>`;
@@ -1096,7 +1096,7 @@ async function loadRules() {
                 <td>${esc(r.match_host || '*')}</td>
                 <td>${esc(r.match_path || '*')}</td>
                 <td>${esc(r.description || '-')}</td>
-                <td>${r.enabled ? '&#x2705;' : '&#x274C;'}</td>
+                <td>${r.enabled ? '<i class="fa-solid fa-circle-check" style="color:var(--green)"></i>' : '<i class="fa-solid fa-circle-xmark" style="color:var(--red)"></i>'}</td>
             </tr>`).join('')}</tbody>
         </table>`;
     } catch (e) {
@@ -1109,7 +1109,7 @@ async function loadRules() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function emptyState(msg) {
-    return `<div class="empty-state"><div class="icon">&#x1F4ED;</div><p>${esc(msg)}</p></div>`;
+    return `<div class="empty-state"><div class="icon"><i class="fa-solid fa-inbox"></i></div><p>${esc(msg)}</p></div>`;
 }
 
 function formatAction(action) {
