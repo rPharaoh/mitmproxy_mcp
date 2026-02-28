@@ -77,8 +77,9 @@ COPY Pipfile Pipfile.lock ./
 RUN pipenv install --deploy --system && pip cache purge
 
 # ── 6. Application code ───────────────────────────────────────────────────
-COPY db.py proxy_addon.py mcp_server.py admin_cli.py ./
+COPY db.py proxy_addon.py mcp_server.py admin_cli.py dashboard_server.py ./
 COPY tools/ ./tools/
+COPY dashboard/ ./dashboard/
 
 # ── 7. Supervisor config ──────────────────────────────────────────────────
 COPY standalone/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
@@ -94,8 +95,8 @@ ENV LLMPROXY_ES_URL=http://127.0.0.1:9200 \
     LLMPROXY_AUTH_REQUIRED=0 \
     LLMPROXY_ADMIN_TOKEN=""
 
-# Proxy: 8080  |  MCP: 8000
-EXPOSE 8080 8000
+# Proxy: 8080  |  MCP: 8000  |  Dashboard: 8002
+EXPOSE 8080 8000 8002
 
 VOLUME ["/var/lib/elasticsearch", "/root/.mitmproxy"]
 

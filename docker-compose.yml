@@ -29,7 +29,7 @@ services:
       LLMPROXY_CAPTURE_BODY: "1"
       LLMPROXY_FLUSH_SIZE: "100"
       LLMPROXY_FLUSH_INTERVAL: "1.0"
-      LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-}"
+      LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-TrWTbCYAanWvPXXQdrM0PioeXRXzHkzf6NgB0ODlQh0}"
       LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-1}"
     volumes:
       - mitmproxy-certs:/root/.mitmproxy    # persist CA cert across rebuilds
@@ -48,7 +48,23 @@ services:
       - "8001:8000"                       # MCP SSE endpoint
     environment:
       LLMPROXY_ES_URL: "http://elasticsearch:9200"
-      LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-}"
+      LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-TrWTbCYAanWvPXXQdrM0PioeXRXzHkzf6NgB0ODlQh0}"
+      LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-1}"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Dashboard UI ────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      target: dashboard
+    ports:
+      - "8002:8002"                       # Dashboard web UI
+    environment:
+      LLMPROXY_ES_URL: "http://elasticsearch:9200"
+      LLMPROXY_ADMIN_TOKEN: "${LLMPROXY_ADMIN_TOKEN:-TrWTbCYAanWvPXXQdrM0PioeXRXzHkzf6NgB0ODlQh0}"
       LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-1}"
     depends_on:
       elasticsearch:

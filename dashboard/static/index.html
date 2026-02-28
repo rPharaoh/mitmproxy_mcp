@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLMProxy Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ── Login Screen ─────────────────────────────────────────────────────── -->
+<div id="login-screen" class="login-screen" style="display:none;">
+    <div class="login-card">
+        <h1>&#x1F6E1; LLMProxy</h1>
+        <p class="login-subtitle">Enter your token to access the dashboard</p>
+        <input type="password" id="login-token" placeholder="Paste your token here" autocomplete="off">
+        <button class="btn btn-primary" id="login-btn" onclick="doLogin()" style="width:100%;justify-content:center;margin-top:8px;">Sign In</button>
+        <div id="login-error" style="color:var(--red);font-size:13px;margin-top:10px;display:none;"></div>
+    </div>
+</div>
+
+<div class="app" id="app-container" style="display:none;">
+
+    <!-- ── Sidebar ──────────────────────────────────────────────────────── -->
+    <nav class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h1>&#x1F6E1; LLMProxy</h1>
+            <div class="subtitle">Traffic Intelligence Dashboard</div>
+        </div>
+
+        <div class="tenant-selector">
+            <label for="tenant-select" style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:4px;">Tenant</label>
+            <select id="tenant-select">
+                <option value="">All tenants</option>
+            </select>
+        </div>
+
+        <div id="user-badge" style="padding:4px 20px;display:none;"></div>
+
+        <div class="nav-section">Overview</div>
+        <div class="nav-item active" data-page="overview">
+            <span class="icon">&#x1F4CA;</span> Dashboard
+        </div>
+        <div class="nav-item" data-page="live">
+            <span class="icon">&#x26A1;</span> Live Feed
+        </div>
+
+        <div class="nav-section">Traffic</div>
+        <div class="nav-item" data-page="requests">
+            <span class="icon">&#x1F310;</span> Requests
+        </div>
+        <div class="nav-item" data-page="domains">
+            <span class="icon">&#x1F3E2;</span> Domains
+        </div>
+        <div class="nav-item" data-page="errors">
+            <span class="icon">&#x26A0;</span> Errors
+        </div>
+        <div class="nav-item" data-page="websocket">
+            <span class="icon">&#x1F50C;</span> WebSocket
+        </div>
+
+        <div class="nav-section">Analysis</div>
+        <div class="nav-item" data-page="performance">
+            <span class="icon">&#x23F1;</span> Performance
+        </div>
+        <div class="nav-item" data-page="security">
+            <span class="icon">&#x1F512;</span> Security
+        </div>
+        <div class="nav-item" data-page="privacy">
+            <span class="icon">&#x1F441;</span> Privacy
+        </div>
+        <div class="nav-item" data-page="api-map">
+            <span class="icon">&#x1F5FA;</span> API Map
+        </div>
+
+        <div class="nav-section">Management</div>
+        <div class="nav-item" data-page="blocked">
+            <span class="icon">&#x1F6AB;</span> Blocked Domains
+        </div>
+        <div class="nav-item" data-page="rules">
+            <span class="icon">&#x2699;</span> Traffic Rules
+        </div>
+    </nav>
+
+    <!-- ── Main Content ─────────────────────────────────────────────────── -->
+    <main class="main">
+
+        <!-- ═══ Overview Page ═══ -->
+        <div class="page-section active" id="page-overview">
+            <div class="page-header">
+                <h2>Dashboard</h2>
+                <p>Traffic overview and key metrics</p>
+            </div>
+            <div class="stats-grid" id="stats-grid"></div>
+            <div class="chart-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Requests Over Time</span>
+                        <select id="summary-hours" class="btn-sm" style="background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-primary);border-radius:4px;padding:4px 8px;font-size:12px;">
+                            <option value="1">Last 1h</option>
+                            <option value="6">Last 6h</option>
+                            <option value="24" selected>Last 24h</option>
+                            <option value="72">Last 3d</option>
+                        </select>
+                    </div>
+                    <div class="chart-container"><canvas id="chart-timeline"></canvas></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><span class="card-title">Top Hosts</span></div>
+                    <div class="chart-container"><canvas id="chart-hosts"></canvas></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><span class="card-title">Recent Requests</span></div>
+                <div class="table-container" id="overview-recent-table"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Live Feed Page ═══ -->
+        <div class="page-section" id="page-live">
+            <div class="page-header">
+                <h2><span class="live-dot"></span> Live Feed</h2>
+                <p>Real-time traffic stream (auto-refreshes every 2s)</p>
+            </div>
+            <div class="toolbar">
+                <button class="btn btn-primary" id="live-toggle">&#x23F8; Pause</button>
+                <span id="live-count" style="color:var(--text-muted);font-size:13px;"></span>
+            </div>
+            <div class="card">
+                <div id="live-feed-list" style="max-height:70vh;overflow-y:auto;"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Requests Page ═══ -->
+        <div class="page-section" id="page-requests">
+            <div class="page-header">
+                <h2>Requests</h2>
+                <p>Browse and search captured HTTP traffic</p>
+            </div>
+            <div class="toolbar">
+                <input type="text" id="req-search" placeholder="Search URLs, bodies...">
+                <select id="req-method">
+                    <option value="">All Methods</option>
+                    <option>GET</option><option>POST</option><option>PUT</option>
+                    <option>PATCH</option><option>DELETE</option><option>OPTIONS</option><option>HEAD</option>
+                </select>
+                <select id="req-limit">
+                    <option value="25">25</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                </select>
+                <button class="btn btn-primary" onclick="loadRequests()">&#x1F50D; Search</button>
+            </div>
+            <div class="card">
+                <div class="table-container" id="requests-table"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Domains Page ═══ -->
+        <div class="page-section" id="page-domains">
+            <div class="page-header">
+                <h2>Domains</h2>
+                <p>Traffic breakdown by host</p>
+            </div>
+            <div class="chart-grid">
+                <div class="card">
+                    <div class="card-header"><span class="card-title">Requests by Domain</span></div>
+                    <div class="chart-container"><canvas id="chart-domains"></canvas></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><span class="card-title">Avg Response Time (ms)</span></div>
+                    <div class="chart-container"><canvas id="chart-domain-latency"></canvas></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><span class="card-title">Domain Details</span></div>
+                <div class="table-container" id="domains-table"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Errors Page ═══ -->
+        <div class="page-section" id="page-errors">
+            <div class="page-header">
+                <h2>Errors</h2>
+                <p>Requests with HTTP status &ge; 400</p>
+            </div>
+            <div class="card">
+                <div class="table-container" id="errors-table"></div>
+            </div>
+        </div>
+
+        <!-- ═══ WebSocket Page ═══ -->
+        <div class="page-section" id="page-websocket">
+            <div class="page-header">
+                <h2>WebSocket</h2>
+                <p>WebSocket connections and messages</p>
+            </div>
+            <div class="stats-grid" id="ws-stats-grid"></div>
+            <div class="card">
+                <div class="card-header"><span class="card-title">Connections</span></div>
+                <div class="table-container" id="ws-connections-table"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Performance Page ═══ -->
+        <div class="page-section" id="page-performance">
+            <div class="page-header">
+                <h2>Performance</h2>
+                <p>Latency analysis, bandwidth, and anomaly detection</p>
+            </div>
+            <div class="tabs" id="perf-tabs">
+                <div class="tab active" data-tab="perf-slow">Slow Endpoints</div>
+                <div class="tab" data-tab="perf-large">Large Payloads</div>
+                <div class="tab" data-tab="perf-redundant">Redundant Requests</div>
+                <div class="tab" data-tab="perf-bandwidth">Bandwidth</div>
+                <div class="tab" data-tab="perf-anomalies">Anomalies</div>
+            </div>
+            <div id="perf-content"></div>
+        </div>
+
+        <!-- ═══ Security Page ═══ -->
+        <div class="page-section" id="page-security">
+            <div class="page-header">
+                <h2>Security</h2>
+                <p>Vulnerability scanning, PII detection, and session analysis</p>
+            </div>
+            <div class="tabs" id="security-tabs">
+                <div class="tab active" data-tab="sec-vulns">Vulnerabilities</div>
+                <div class="tab" data-tab="sec-pii">PII Detection</div>
+                <div class="tab" data-tab="sec-sessions">Sessions</div>
+                <div class="tab" data-tab="sec-issues">Session Issues</div>
+                <div class="tab" data-tab="sec-c2">C2 Patterns</div>
+            </div>
+            <div id="security-content"></div>
+        </div>
+
+        <!-- ═══ Privacy Page ═══ -->
+        <div class="page-section" id="page-privacy">
+            <div class="page-header">
+                <h2>Privacy</h2>
+                <p>Third-party tracking and cookie analysis</p>
+            </div>
+            <div class="tabs" id="privacy-tabs">
+                <div class="tab active" data-tab="priv-third">Third Parties</div>
+                <div class="tab" data-tab="priv-cookies">Cookies</div>
+            </div>
+            <div id="privacy-content"></div>
+        </div>
+
+        <!-- ═══ API Map Page ═══ -->
+        <div class="page-section" id="page-api-map">
+            <div class="page-header">
+                <h2>API Map</h2>
+                <p>Discovered endpoints and OpenAPI generation</p>
+            </div>
+            <div class="toolbar">
+                <select id="apimap-host">
+                    <option value="">Select a domain...</option>
+                </select>
+                <button class="btn btn-primary" onclick="loadApiMap()">&#x1F50D; Load</button>
+                <button class="btn" id="btn-openapi" onclick="downloadOpenApi()" disabled>&#x1F4E5; Download OpenAPI Spec</button>
+            </div>
+            <div class="card">
+                <div class="table-container" id="apimap-table"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Blocked Domains Page ═══ -->
+        <div class="page-section" id="page-blocked">
+            <div class="page-header">
+                <h2>Blocked Domains</h2>
+                <p>Manage domain blocking rules</p>
+            </div>
+            <div class="toolbar">
+                <input type="text" id="block-domain" placeholder="Domain to block (e.g. ads.example.com)">
+                <input type="text" id="block-reason" placeholder="Reason (optional)">
+                <button class="btn btn-danger" onclick="blockDomain()">&#x1F6AB; Block</button>
+            </div>
+            <div class="card">
+                <div class="table-container" id="blocked-table"></div>
+            </div>
+        </div>
+
+        <!-- ═══ Rules Page ═══ -->
+        <div class="page-section" id="page-rules">
+            <div class="page-header">
+                <h2>Traffic Rules</h2>
+                <p>View active traffic routing and modification rules</p>
+            </div>
+            <div class="card">
+                <div class="table-container" id="rules-table"></div>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+<!-- ── Request Detail Modal ─────────────────────────────────────────────── -->
+<div class="modal-overlay" id="request-modal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2>Request Detail</h2>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="request-modal-body"></div>
+    </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

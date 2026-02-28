@@ -13,6 +13,7 @@ docker compose up -d
 |-------------|------|--------------------------------|
 | Proxy       | 8080 | Point your browser/app here    |
 | MCP Server  | 8001 | Connect your LLM client here   |
+| Dashboard   | 8002 | Web UI for traffic visualization |
 | Elasticsearch | *(internal)* | 127.0.0.1:9200 inside container |
 
 ## Setup
@@ -27,6 +28,8 @@ docker compose up -d
 3. **Install the CA certificate** via `http://mitm.it` (one-time, persisted in volume)
 
 4. **Connect your MCP client** to `http://localhost:8001/mcp/`
+
+5. **Open the Dashboard** at `http://localhost:8002`
 
    VS Code `.vscode/mcp.json`:
    ```json
@@ -84,6 +87,7 @@ docker compose logs -f
 docker compose exec mitmproxy-mcp supervisorctl status
 docker compose exec mitmproxy-mcp supervisorctl tail -f proxy
 docker compose exec mitmproxy-mcp supervisorctl tail -f mcp
+docker compose exec mitmproxy-mcp supervisorctl tail -f dashboard
 docker compose exec mitmproxy-mcp supervisorctl tail -f elasticsearch
 ```
 
@@ -91,7 +95,7 @@ docker compose exec mitmproxy-mcp supervisorctl tail -f elasticsearch
 
 | | Standalone | Multi-Container (`../docker-compose.yml`) |
 |---|---|---|
-| Containers | 1 | 3 |
+| Containers | 1 | 4 |
 | Setup | Simpler | More flexible |
 | Best for | Local dev, demos, single user | Production, teams, scaling |
 | ES management | Built-in | Separate container |

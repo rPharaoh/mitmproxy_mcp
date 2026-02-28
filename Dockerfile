@@ -41,8 +41,9 @@ COPY Pipfile Pipfile.lock ./
 RUN pipenv install --deploy --system && \
     pip cache purge
 
-COPY db.py proxy_addon.py mcp_server.py admin_cli.py ./
+COPY db.py proxy_addon.py mcp_server.py admin_cli.py dashboard_server.py ./
 COPY tools/ ./tools/
+COPY dashboard/ ./dashboard/
 
 ENV LLMPROXY_ES_URL=http://elasticsearch:9200
 
@@ -61,3 +62,11 @@ FROM base AS mcp
 
 EXPOSE 8000
 ENTRYPOINT ["python", "mcp_server.py"]
+
+# ---------------------------------------------------------------------------
+# Dashboard target  –  web UI for traffic visualization
+# ---------------------------------------------------------------------------
+FROM base AS dashboard
+
+EXPOSE 8002
+ENTRYPOINT ["python", "dashboard_server.py"]

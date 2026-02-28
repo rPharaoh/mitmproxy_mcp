@@ -9,6 +9,7 @@ services:
     ports:
       - "8080:8080"    # mitmproxy
       - "8001:8000"    # MCP server
+      - "8002:8002"    # Dashboard UI
     environment:
       ES_JAVA_OPTS: "-Xms512m -Xmx512m"
       LLMPROXY_AUTH_REQUIRED: "${LLMPROXY_AUTH_REQUIRED:-0}"

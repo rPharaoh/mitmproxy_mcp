@@ -366,6 +366,31 @@ def is_admin_token(token: str) -> bool:
     return bool(ADMIN_TOKEN) and token == ADMIN_TOKEN
 
 
+def validate_token_info(token: str) -> dict | None:
+    """Validate a token and return {tenant_id, name}, or None if invalid."""
+    if ADMIN_TOKEN and token == ADMIN_TOKEN:
+        return None
+
+    # Try ES lookup to get full info including name
+    try:
+        es = _get_es()
+        resp = es.search(
+            index=IDX_TOKENS,
+            body={"query": {"bool": {"must": [
+                {"term": {"token": token}},
+                {"term": {"active": True}},
+            ]}}},
+            size=1,
+        )
+        hits = resp["hits"]["hits"]
+        if hits:
+            src = hits[0]["_source"]
+            return {"tenant_id": src["tenant_id"], "name": src.get("name", "")}
+    except Exception:
+        pass
+    return None
+
+
 def revoke_token(token: str) -> bool:
     """Revoke (deactivate) a token. Returns True if found and revoked."""
     es = _get_es()

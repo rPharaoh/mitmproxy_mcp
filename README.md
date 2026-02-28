@@ -22,9 +22,16 @@ An MCP server that exposes **mitmproxy-captured web traffic** as tools an LLM ca
                                                     │  LLM Client   │
                                                     │  (Claude, etc)│
                                                     └───────────────┘
+                                                    ┌───────▲───────┐
+                                                    │   Dashboard   │
+                                                    │  (web UI on   │
+                                                    │   port 8002)  │
+                                                    └───────────────┘
 ```
 
 The **proxy** and the **MCP server** run as separate containers. The proxy writes captured request/response data to a shared **Elasticsearch** instance (full-text search, aggregations, concurrent access), and the MCP server reads from it. A write buffer batches proxy inserts via the ES bulk API for maximum throughput under heavy traffic.
+
+The **Dashboard** provides a web UI for visualizing traffic, security findings, performance analysis, and managing proxy rules — no LLM client required.
 
 ## Quick Start
 
@@ -37,6 +44,7 @@ docker compose up -d
 This starts:
 - **Proxy** on `http://localhost:8080` — point your browser/app here
 - **MCP server** (Streamable HTTP) on `http://localhost:8001` — connect your LLM client here
+- **Dashboard** on `http://localhost:8002` — web UI for traffic visualization
 
 Both connect to a shared Elasticsearch instance (started automatically).
 
@@ -382,6 +390,39 @@ pipenv run python mcp_server.py --transport sse --port 8000
 | `LLMPROXY_FLUSH_INTERVAL` | `1.0` | Seconds before timer-based buffer flush |
 | `LLMPROXY_AUTH_REQUIRED` | `0` | Set to `1` to enable multi-tenant token authentication |
 | `LLMPROXY_ADMIN_TOKEN` | *(empty)* | Admin token for unrestricted access and token management |
+
+## Dashboard
+
+The **Dashboard** is a web-based UI available at `http://localhost:8002` that provides full visibility into captured traffic without needing an LLM client.
+
+### Features
+
+| Page | Description |
+|------|-------------|
+| **Overview** | Real-time stats, request timeline, top hosts/domains charts |
+| **Live Feed** | Auto-refreshing stream of HTTP and WebSocket traffic |
+| **Requests** | Searchable request table with full detail modal (headers, body, timing) |
+| **Domains** | Domain breakdown with request counts and traffic volume |
+| **Errors** | Filtered view of 4xx/5xx responses |
+| **WebSocket** | WebSocket connections and message inspector |
+| **Performance** | Slow endpoints, large payloads, and performance analysis |
+| **Security** | Vulnerability scan results, security header checks |
+| **Privacy** | Third-party audit, cookie analysis, PII detection |
+| **API Map** | Discovered API endpoints per domain with OpenAPI spec generation |
+| **Blocked** | Manage blocked domains |
+| **Rules** | Create, toggle, and remove traffic manipulation rules |
+
+### Authentication
+
+When `LLMPROXY_AUTH_REQUIRED=1`, the dashboard shows a **login screen** prompting for a token:
+
+- **Admin token** — full access to all data plus a tenant selector to filter by user
+- **User token** — scoped view showing only that user's own traffic
+
+The user badge in the sidebar shows the token's **name** (set during token creation) with a logout button.
+
+When auth is disabled (`LLMPROXY_AUTH_REQUIRED=0`), the dashboard loads directly with full access and a tenant selector dropdown.
+
 ## Files
 
 | File | Purpose |
@@ -405,8 +446,12 @@ pipenv run python mcp_server.py --transport sse --port 8000
 | `tools/recon.py` | Asset discovery and reconnaissance (host discovery, HTTP probing, DNS enum) |
 | `Pipfile` | Python dependencies (pipenv) |
 | `Pipfile.lock` | Locked dependency versions |
-| `Dockerfile` | Multi-stage build (proxy + mcp targets) with nmap, nikto, httpx, dnsx, subfinder, sslyze |
-| `docker-compose.yml` | Runs proxy + MCP server + Elasticsearch together |
+| `Dockerfile` | Multi-stage build (proxy + mcp + dashboard targets) with nmap, nikto, httpx, dnsx, subfinder, sslyze |
+| `docker-compose.yml` | Runs proxy + MCP server + Dashboard + Elasticsearch together |
+| `dashboard_server.py` | Dashboard REST API server + static file server (Starlette/Uvicorn) |
+| `dashboard/static/index.html` | Dashboard single-page application shell |
+| `dashboard/static/style.css` | Dashboard dark theme styles |
+| `dashboard/static/app.js` | Dashboard client-side logic, charts, auth flow |
 
 ## Example Prompts
 
