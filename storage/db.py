@@ -430,6 +430,20 @@ def revoke_token_by_id(doc_id: str) -> bool:
     return True
 
 
+def delete_token_by_id(doc_id: str) -> bool:
+    """Permanently delete a token by ES document ID."""
+    es = _get_es()
+    try:
+        doc = es.get(index=IDX_TOKENS, id=doc_id)
+    except Exception:
+        return False
+    token_val = doc["_source"].get("token", "")
+    es.delete(index=IDX_TOKENS, id=doc_id, refresh="wait_for")
+    with _token_cache_lock:
+        _token_cache.pop(token_val, None)
+    return True
+
+
 def list_tokens() -> list[dict]:
     """List all tokens (admin only). Returns token metadata without the raw token value."""
     body = {"query": {"match_all": {}}, "sort": [{"created_at": "desc"}]}

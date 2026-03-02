@@ -525,13 +525,14 @@ async function loadTokens() {
                 const revokeBtn = t.active !== false
                     ? `<button class="btn btn-sm btn-danger" onclick="revokeToken('${esc(t.id)}')"><i class="fa-solid fa-ban"></i> Revoke</button>`
                     : '';
+                const deleteBtn = `<button class="btn btn-sm btn-danger" onclick="deleteToken('${esc(t.id)}', '${esc(t.name || '')}')" style="margin-left:4px;"><i class="fa-solid fa-trash"></i> Delete</button>`;
                 return `<tr>
                     <td><strong>${esc(t.name || '—')}</strong></td>
                     <td><code style="font-size:11px;">${esc(t.tenant_id || '—')}</code> <button class="btn btn-sm" onclick="copyText('${esc(t.tenant_id || '')}', this)" title="Copy Tenant ID" style="padding:2px 6px;font-size:10px;"><i class="fa-solid fa-copy"></i></button></td>
                     <td><code style="font-size:11px;">${esc(t.token || '—')}</code> <button class="btn btn-sm" onclick="copyText('${esc(t.token || '')}', this)" title="Copy Token" style="padding:2px 6px;font-size:10px;"><i class="fa-solid fa-copy"></i></button></td>
                     <td>${status}</td>
                     <td>${created}</td>
-                    <td>${revokeBtn}</td>
+                    <td>${revokeBtn}${deleteBtn}</td>
                 </tr>`;
             }).join('')}</tbody>
         </table>`;
@@ -636,6 +637,19 @@ async function revokeToken(docId) {
         loadTokens();
     } catch (e) {
         alert('Failed to revoke token');
+    }
+}
+
+async function deleteToken(docId, name) {
+    if (!confirm(`Permanently delete token "${name || docId}"? This cannot be undone.`)) return;
+    try {
+        const result = await apiPost('/api/tokens/delete', { id: docId });
+        if (result.error) {
+            alert('Error: ' + result.error);
+        }
+        loadTokens();
+    } catch (e) {
+        alert('Failed to delete token');
     }
 }
 

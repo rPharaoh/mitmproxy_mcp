@@ -587,6 +587,26 @@ async def api_revoke_token(request: Request) -> JSONResponse:
         return _error(str(e), 500)
 
 
+async def api_delete_token(request: Request) -> JSONResponse:
+    """POST /api/tokens/delete – permanently delete a token (admin only).
+
+    Body: {"id": "es-document-id"}
+    """
+    if db.AUTH_REQUIRED and not getattr(request.state, "is_admin", False):
+        return _error("Admin access required", 403)
+    try:
+        body = await request.json()
+        doc_id = (body.get("id") or "").strip()
+        if not doc_id:
+            return _error("Token id is required", 400)
+        ok = db.delete_token_by_id(doc_id)
+        if ok:
+            return _json_response({"deleted": True})
+        return _error("Token not found", 404)
+    except Exception as e:
+        return _error(str(e), 500)
+
+
 # ---------------------------------------------------------------------------
 # Route handlers – Tenants
 # ---------------------------------------------------------------------------
@@ -922,6 +942,7 @@ routes = [
     Route("/api/tokens", api_list_tokens, methods=["GET"]),
     Route("/api/tokens", api_create_token, methods=["POST"]),
     Route("/api/tokens/revoke", api_revoke_token, methods=["POST"]),
+    Route("/api/tokens/delete", api_delete_token, methods=["POST"]),
 
     # Clear data
     Route("/api/clear", api_clear_data, methods=["POST"]),
