@@ -6,6 +6,7 @@ Usage (Docker):
     docker compose exec mcp python admin_cli.py create "My App"
     docker compose exec mcp python admin_cli.py list
     docker compose exec mcp python admin_cli.py revoke <token>
+    docker compose exec mcp python admin_cli.py delete <token>
 
 Usage (local):
     LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py create "My App"
@@ -80,6 +81,20 @@ def cmd_revoke(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_delete(args: argparse.Namespace) -> None:
+    """Permanently delete a token."""
+    if not args.yes:
+        answer = input("Permanently delete this token? This cannot be undone. [y/N] ")
+        if answer.lower() not in ("y", "yes"):
+            print("Aborted.")
+            return
+    if db.delete_token(args.token):
+        print("Token deleted permanently.")
+    else:
+        print("Token not found.", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_clear(args: argparse.Namespace) -> None:
     """Clear all captured data for a tenant."""
     if args.no_tenant:
@@ -122,6 +137,12 @@ def main() -> None:
     p_revoke = sub.add_parser("revoke", help="Revoke a token")
     p_revoke.add_argument("token", help="Full token string to revoke")
     p_revoke.set_defaults(func=cmd_revoke)
+
+    # delete
+    p_delete = sub.add_parser("delete", help="Permanently delete a token")
+    p_delete.add_argument("token", help="Full token string to delete")
+    p_delete.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    p_delete.set_defaults(func=cmd_delete)
 
     # clear
     p_clear = sub.add_parser("clear", help="Clear all captured data for a tenant")

@@ -41,6 +41,14 @@ def register(mcp, helpers):
         return _json({"status": "revoked" if revoked else "not_found"})
 
     @mcp.tool()
+    def delete_token(token: str) -> str:
+        """Permanently delete an API token (admin only). This cannot be undone."""
+        if not _is_admin.get(False) and db.AUTH_REQUIRED:
+            return _json({"error": "Admin token required for this operation"})
+        deleted = db.delete_token(token)
+        return _json({"status": "deleted" if deleted else "not_found"})
+
+    @mcp.tool()
     def clear_tenant_data(tenant_id: str) -> str:
         """Delete all captured data for a tenant (admin only).
 

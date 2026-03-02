@@ -122,6 +122,9 @@ docker compose exec mcp python admin_cli.py list
 
 # Revoke a token
 docker compose exec mcp python admin_cli.py revoke <token>
+
+# Permanently delete a token
+docker compose exec mcp python admin_cli.py delete <token>
 ```
 
 For local (non-Docker) usage:
@@ -130,6 +133,7 @@ For local (non-Docker) usage:
 LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py create "My App"
 LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py list
 LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py revoke <token>
+LLMPROXY_ES_URL=http://localhost:9200 python admin_cli.py delete <token>
 ```
 
 The `create` command prints the raw token (shown only once), tenant ID, and a ready-to-paste MCP client config snippet.
@@ -141,6 +145,7 @@ The `create` command prints the raw token (shown only once), tenant ID, and a re
 | `create_token` | Create a new user token |
 | `list_tokens` | List all tokens with masked values |
 | `revoke_token` | Revoke / deactivate a token |
+| `delete_token` | Permanently delete a token |
 
 #### Backward Compatibility
 
@@ -377,6 +382,7 @@ pipenv run python mcp_server.py --transport sse --port 8000
 | `create_token` | Create a new user token |
 | `list_tokens` | List all tokens with masked values |
 | `revoke_token` | Revoke / deactivate a token |
+| `delete_token` | Permanently delete a token |
 | `clear_tenant_data` | Delete all captured data for a tenant (requests, websockets, tags, rules, blocked domains) |
 
 ## Environment Variables

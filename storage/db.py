@@ -430,6 +430,23 @@ def revoke_token_by_id(doc_id: str) -> bool:
     return True
 
 
+def delete_token(token: str) -> bool:
+    """Permanently delete a token by its value. Returns True if found and deleted."""
+    es = _get_es()
+    resp = es.search(
+        index=IDX_TOKENS,
+        body={"query": {"term": {"token": token}}},
+        size=1,
+    )
+    hits = resp["hits"]["hits"]
+    if not hits:
+        return False
+    es.delete(index=IDX_TOKENS, id=hits[0]["_id"], refresh="wait_for")
+    with _token_cache_lock:
+        _token_cache.pop(token, None)
+    return True
+
+
 def delete_token_by_id(doc_id: str) -> bool:
     """Permanently delete a token by ES document ID."""
     es = _get_es()
