@@ -395,6 +395,15 @@ pipenv run python mcp_server.py --transport sse --port 8000
 
 The **Dashboard** is a web-based UI available at `http://localhost:8002` that provides full visibility into captured traffic without needing an LLM client.
 
+### Screenshots
+
+| | |
+|---|---|
+| **Overview** | **Live Feed** |
+| ![Overview](docs/screenshots/overview.png) | ![Live Feed](docs/screenshots/live-feed.png) |
+| **Domains** | **Login**
+| ![Domains](docs/screenshots/domains.png) | ![Login](docs/screenshots/login.png) |
+
 ### Features
 
 | Page | Description |
