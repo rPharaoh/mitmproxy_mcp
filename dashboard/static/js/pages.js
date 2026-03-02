@@ -527,8 +527,8 @@ async function loadTokens() {
                     : '';
                 return `<tr>
                     <td><strong>${esc(t.name || '—')}</strong></td>
-                    <td><code style="font-size:11px;">${esc(t.tenant_id || '—')}</code></td>
-                    <td><code style="font-size:11px;">${esc(t.token || '—')}</code></td>
+                    <td><code style="font-size:11px;">${esc(t.tenant_id || '—')}</code> <button class="btn btn-sm" onclick="copyText('${esc(t.tenant_id || '')}', this)" title="Copy Tenant ID" style="padding:2px 6px;font-size:10px;"><i class="fa-solid fa-copy"></i></button></td>
+                    <td><code style="font-size:11px;">${esc(t.token || '—')}</code> <button class="btn btn-sm" onclick="copyText('${esc(t.token || '')}', this)" title="Copy Token" style="padding:2px 6px;font-size:10px;"><i class="fa-solid fa-copy"></i></button></td>
                     <td>${status}</td>
                     <td>${created}</td>
                     <td>${revokeBtn}</td>
@@ -576,12 +576,53 @@ async function createToken() {
 
 function copyNewToken() {
     const input = document.getElementById('new-token-value');
-    if (input) {
-        input.select();
-        navigator.clipboard.writeText(input.value).then(() => {
-            input.style.borderColor = 'var(--green)';
-            setTimeout(() => { input.style.borderColor = ''; }, 1500);
-        });
+    if (!input) return;
+    input.select();
+    input.setSelectionRange(0, 99999);
+    const copyBtn = input.parentElement?.querySelector('.btn');
+
+    function showSuccess() {
+        input.style.borderColor = 'var(--green)';
+        if (copyBtn) {
+            copyBtn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
+            copyBtn.style.color = 'var(--green)';
+            copyBtn.style.borderColor = 'var(--green)';
+        }
+        setTimeout(() => {
+            input.style.borderColor = '';
+            if (copyBtn) {
+                copyBtn.innerHTML = '<i class="fa-solid fa-copy"></i> Copy';
+                copyBtn.style.color = '';
+                copyBtn.style.borderColor = '';
+            }
+        }, 2000);
+    }
+
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(input.value).then(showSuccess);
+    } else {
+        // Fallback for HTTP contexts where clipboard API is blocked
+        try { document.execCommand('copy'); showSuccess(); } catch (_) {}
+    }
+}
+
+function copyText(text, btn) {
+    function showCopied() {
+        if (!btn) return;
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<i class="fa-solid fa-check"></i>';
+        btn.style.color = 'var(--green)';
+        btn.style.borderColor = 'var(--green)';
+        setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(showCopied);
+    } else {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); showCopied(); } catch (_) {}
+        document.body.removeChild(ta);
     }
 }
 
