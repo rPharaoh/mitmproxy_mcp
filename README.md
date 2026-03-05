@@ -216,7 +216,22 @@ pipenv run python mcp_server.py --transport sse --port 8000
 }
 ```
 
-**Docker with auth:**
+**Docker with auth (header — recommended):**
+
+```json
+{
+  "servers": {
+    "llmproxy": {
+      "url": "http://localhost:8001/mcp/",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN_HERE"
+      }
+    }
+  }
+}
+```
+
+**Docker with auth (query parameter):**
 
 ```json
 {
@@ -253,6 +268,21 @@ pipenv run python mcp_server.py --transport sse --port 8000
   "mcpServers": {
     "llmproxy": {
       "url": "http://localhost:8001/mcp/"
+    }
+  }
+}
+```
+
+**Docker with auth:**
+
+```json
+{
+  "mcpServers": {
+    "llmproxy": {
+      "url": "http://localhost:8001/mcp/",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN_HERE"
+      }
     }
   }
 }
