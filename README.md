@@ -13,20 +13,19 @@ An MCP server that exposes **mitmproxy-captured web traffic** as tools an LLM ca
                           └──────────────┘          └───────┬───────┘
                                                         read│read/write
                                                     ┌───────┼───────┐
-                                              ┌─────┴─────┐ │ ┌─────┴─────┐
-                                              │ MCP Server│ │ │ Dashboard │
-                                              │ (mcp_     │ │ │ (web UI   │
-                                              │  server)  │ │ │  :8002)   │
-                                              └─────┬─────┘ │ └─────┬─────┘
-                                                    │       │       │
-                                              MCP protocol  │    browser
-                                                    │       │       │
-                                              ┌─────▼─────┐ │ ┌─────▼─────┐
-                                              │ LLM Client│ │ │   Admin / │
-                                              │ (Claude,  │ │ │   User    │
-                                              │  VS Code) │ │ │           │
-                                              └───────────┘ │ └───────────┘
-                                                            │
+                                              ┌─────┴─────┐   ┌─────┴─────┐
+                                              │ MCP Server│   │ Dashboard │
+                                              │ (mcp_     │   │ (web UI   │
+                                              │  server)  │   │  :8002)   │
+                                              └─────┬─────┘   └─────┬─────┘
+                                                    │               │
+                                              MCP protocol       browser
+                                                    │               │
+                                              ┌─────▼─────┐   ┌─────▼─────┐
+                                              │ LLM Client│   │   Admin / │
+                                              │ (Claude,  │   │   User    │
+                                              │  VS Code) │   │           │
+                                              └───────────┘   └───────────┘
 ```
 
 The **proxy** and the **MCP server** run as separate containers. The proxy writes captured request/response data to a shared **Elasticsearch** instance (full-text search, aggregations, concurrent access), and the MCP server reads from it. A write buffer batches proxy inserts via the ES bulk API for maximum throughput under heavy traffic.
